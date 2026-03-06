@@ -1,0 +1,9 @@
+module main
+
+fn factorial(n: Int) -> Int =
+    if n <= 1 then 1
+    else n * factorial(n - 1)
+
+fn main() -> Int = do
+    print(factorial(12))
+    0

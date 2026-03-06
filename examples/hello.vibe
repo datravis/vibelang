@@ -1,0 +1,5 @@
+module main
+
+fn main() -> Int = do
+    print("Hello from VibeLang!")
+    0
