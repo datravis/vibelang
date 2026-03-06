@@ -3,8 +3,8 @@
 ## 1. Overview
 
 **VibeLang** is a purely functional, natively compiled programming language designed for
-high-performance concurrent and parallel data processing. It combines the memory safety
-guarantees of ownership-based systems (inspired by Rust) with the composability and
+high-performance concurrent and parallel data processing. It combines compiler-managed
+memory safety (inspired by MLKit and Rust's guarantees) with the composability and
 reasoning clarity of purely functional languages (inspired by Haskell, Erlang, and ML).
 
 VibeLang is explicitly designed to be **written and read by both humans and LLMs**. Its
@@ -15,9 +15,9 @@ syntax favors regularity, explicitness, and unambiguous structure over brevity o
 1. **Pure by default, effects by declaration.** All functions are pure unless they declare
    an effect signature. Side effects are tracked in the type system via algebraic effects.
 
-2. **Ownership without mutation.** Values have unique owners. When a value is "moved," the
-   old binding becomes inaccessible. Since data is immutable, ownership exists solely to
-   control *when* memory is freed — no borrow checker needed for aliasing safety.
+2. **Immutable data, automatic memory.** All values are immutable. Since nothing is
+   mutated, values can be freely shared without aliasing concerns. The compiler manages
+   memory via region inference and reference counting — no GC, no ownership annotations.
 
 3. **Explicit parallelism, fearless concurrency.** Parallel computation is expressed through
    structured combinators (`par`, `pmap`, `race`, `stream`), not threads and locks. The
@@ -28,8 +28,8 @@ syntax favors regularity, explicitness, and unambiguous structure over brevity o
    LLMs and humans should be able to predict what code does from its syntax alone.
 
 5. **Native compilation.** VibeLang compiles to native machine code via LLVM. There is no
-   interpreter, no VM, no GC. Memory is managed through ownership and region-based
-   allocation.
+   interpreter, no VM, no GC. Memory is managed through compiler-inferred regions and
+   automatic reference counting.
 
 6. **Turing complete.** VibeLang supports unbounded recursion and is fully Turing complete.
    Recursive data types and recursive functions are first-class.

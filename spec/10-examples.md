@@ -41,7 +41,7 @@ fn count_words(text: String) -> Map[String, UInt] =
         |> to_lower
         |> split(" ")
         |> fold(Map.empty(), fn(acc, word) =
-            let count = Map.get(ref acc, ref word) |> unwrap_or(0)
+            let count = Map.get(acc, word) |> unwrap_or(0)
             Map.insert(acc, word, count + 1)
         )
 
@@ -56,7 +56,7 @@ fn parallel_word_count(documents: List[String]) -> Map[String, UInt] =
 fn main() -> Unit with IO = do
     let docs = ["hello world hello", "world goodbye hello", "hello hello world"]
     let counts = parallel_word_count(docs)
-    Map.entries(ref counts)
+    Map.entries(counts)
         |> for_each(fn((word, count)) = print("${word}: ${show(count)}"))
 ```
 
@@ -119,7 +119,7 @@ type Event = {
 }
 
 fn parse_event(line: String) -> Option[Event] =
-    match parse_json(ref line)
+    match parse_json(line)
     | Ok(json) -> Some({
         timestamp: json.get("ts") |> flat_map(parse_instant),
         user_id: json.get_string("uid") |> unwrap_or("unknown"),
@@ -147,7 +147,7 @@ fn main() -> Unit with IO = do
 
     let metrics = compute_metrics(events)
 
-    Map.entries(ref metrics)
+    Map.entries(metrics)
         |> for_each(fn((key, value)) =
             print("${key}: ${show(value)}")
         )
@@ -171,7 +171,7 @@ fn insert[A: Ord](tree: Tree[A], value: A) -> Tree[A] =
         | Greater -> Node(left, v, insert(right, value))
         | Equal -> Node(left, value, right)
 
-fn contains[A: Ord](tree: ref Tree[A], value: ref A) -> Bool =
+fn contains[A: Ord](tree: Tree[A], value: A) -> Bool =
     match tree
     | Leaf -> false
     | Node(left, v, right) ->
@@ -189,12 +189,12 @@ fn to_sorted_list[A](tree: Tree[A]) -> List[A] =
 fn from_list[A: Ord](items: List[A]) -> Tree[A] =
     fold(items, Leaf, fn(tree, item) = insert(tree, item))
 
-fn height[A](tree: ref Tree[A]) -> UInt =
+fn height[A](tree: Tree[A]) -> UInt =
     match tree
     | Leaf -> 0
     | Node(left, _, right) -> 1 + max(height(left), height(right))
 
-fn size[A](tree: ref Tree[A]) -> UInt =
+fn size[A](tree: Tree[A]) -> UInt =
     match tree
     | Leaf -> 0
     | Node(left, _, right) -> 1 + size(left) + size(right)
@@ -227,7 +227,7 @@ fn eval(expr: Expr) -> Int with State[Env], Fail[EvalError] =
     | Lit(n) -> n
     | Var(name) -> do
         let env = get()
-        match Map.get(ref env, ref name)
+        match Map.get(env, name)
         | Some(value) -> value
         | None -> fail(UndefinedVariable(name))
     | Add(a, b) -> eval(a) + eval(b)

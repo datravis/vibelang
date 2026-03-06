@@ -4,7 +4,7 @@ VibeLang uses a **Hindley-Milner type system** extended with:
 - Algebraic data types (sum and product types)
 - Parametric polymorphism (generics)
 - Algebraic effects and effect handlers
-- Linear/affine ownership annotations
+- Compiler-managed memory (region inference + refcounting)
 - Row-polymorphic records
 
 All types are inferred at the module level unless explicitly annotated. Type annotations are
@@ -129,43 +129,22 @@ fn sort[A: Ord](list: List[A]) -> List[A] = ...
 fn deduplicate[A: Eq + Hash](list: List[A]) -> List[A] = ...
 ```
 
-## 2.5 Ownership and Linearity
+## 2.5 Values and Memory
 
-Every value in VibeLang has exactly **one owner**. When a value is passed to a function
-or bound to a new name, it is **moved** — the previous binding becomes inaccessible.
+All values in VibeLang are **immutable**. There is no concept of programmer-visible
+ownership, borrowing, or move semantics. Values can be freely shared, passed to
+functions, and used multiple times:
 
 ```
 let a = "hello"
-let b = a           -- `a` is moved into `b`; using `a` after this is a compile error
+let b = a           -- both `a` and `b` refer to the same string
+print(a)            -- still valid
+print(b)            -- also valid
 ```
 
-Since all data is immutable, ownership exists purely for **deterministic memory reclamation**,
-not for preventing data races (which cannot occur without mutation).
-
-### Ownership Modifiers
-
-- **`own`** (default): The value is uniquely owned. Dropped when the owner goes out of scope.
-- **`ref`**: A borrowed, read-only view. The referent must outlive the borrow. No allocation.
-- **`share`**: A reference-counted shared handle. Allows multiple owners. Freed when the
-  last handle is dropped.
-
-```
-fn length(s: ref String) -> UInt = ...      -- borrows, does not consume
-fn process(data: own Chunk) -> Result = ... -- takes ownership, caller loses access
-fn cache(item: share Config) -> Unit = ...  -- shared ownership via refcount
-```
-
-The compiler infers `ref` vs `own` in many cases. `share` is always explicit.
-
-### Copy Types
-
-Small value types (`Bool`, `Int`, `UInt`, `Float`, `Byte`, `Char`) are implicitly `Copy` —
-they are duplicated rather than moved. User-defined types can opt into `Copy` if all fields
-are `Copy`:
-
-```
-type Point = { x: Float, y: Float } deriving Copy
-```
+The compiler manages memory automatically using region inference and reference counting
+(see [Chapter 6: Memory](06-memory.md)). The programmer never annotates lifetimes or
+ownership — this is the benefit of immutability.
 
 ## 2.6 Row Polymorphism (Extensible Records)
 

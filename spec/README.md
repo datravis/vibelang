@@ -6,11 +6,11 @@ for high-performance concurrent data processing and LLM-assisted development.
 ## Table of Contents
 
 1. [Overview](01-overview.md) — Design principles, goals, and non-goals
-2. [Type System](02-type-system.md) — Primitives, ADTs, generics, traits, ownership, row polymorphism
+2. [Type System](02-type-system.md) — Primitives, ADTs, generics, traits, row polymorphism
 3. [Syntax](03-syntax.md) — Lexical structure, bindings, functions, pattern matching, modules
 4. [Effects](04-effects.md) — Algebraic effects, handlers, effect polymorphism, purity
 5. [Concurrency](05-concurrency.md) — Parallel combinators, streams, channels, actors, runtime model
-6. [Memory](06-memory.md) — Ownership, borrowing, regions, arrays, resource management, unsafe
+6. [Memory](06-memory.md) — Region inference, refcounting, arrays, resource management, unsafe
 7. [Compilation](07-compilation.md) — Pipeline, optimizations, build system, cross-compilation
 8. [Standard Library](08-stdlib.md) — Core modules, collections, I/O, testing
 9. [LLM Design](09-llm-design.md) — Regularity, annotations, error messages, code generation patterns
@@ -23,7 +23,7 @@ for high-performance concurrent data processing and LLM-assisted development.
 |----------|--------|-----------|
 | Purity | Pure by default | Enables safe parallelism, memoization, and equational reasoning |
 | Effects | Algebraic effects | Composable, no monad transformer stacks, handler-swappable |
-| Memory | Ownership + regions | Deterministic, no GC, Rust-level safety without borrow complexity |
+| Memory | Region inference + refcounting | Deterministic, no GC, no annotations — compiler manages everything |
 | Parallelism | Structured combinators | No data races by construction, declarative intent |
 | Syntax | Regular, unambiguous | LLM-friendly generation, single canonical form |
 | Compilation | LLVM native | Maximum performance, cross-platform support |

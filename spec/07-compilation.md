@@ -16,7 +16,7 @@ Source (.vibe)
     ▼
 ┌──────────────┐
 │ Type Checker  │  ──▶  Typed AST + Effect annotations
-│ & Inference   │       + Ownership verification
+│ & Inference   │       + Region inference
 └──────────────┘
     │
     ▼

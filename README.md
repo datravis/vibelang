@@ -18,7 +18,7 @@ fn count_words(text: String) -> Map[String, UInt] =
         |> to_lower
         |> split(" ")
         |> fold(Map.empty(), fn(acc, word) =
-            Map.insert(acc, word, Map.get(ref acc, ref word) |> unwrap_or(0) + 1)
+            Map.insert(acc, word, Map.get(acc, word) |> unwrap_or(0) + 1)
         )
 
 fn main() -> Unit with IO = do
@@ -26,13 +26,13 @@ fn main() -> Unit with IO = do
     let word_counts = documents
         |> pmap(count_words)
         |> preduce(Map.empty(), fn(a, b) = Map.merge(a, b, fn(x, y) = x + y))
-    print("Total unique words: ${show(Map.size(ref word_counts))}")
+    print("Total unique words: ${show(Map.size(word_counts))}")
 ```
 
 ## Key Features
 
 - **Purely functional** — immutable data, algebraic effects for side effects
-- **Memory safe** — ownership-based, no GC, no null, no data races
+- **Memory safe** — compiler-managed (region inference + refcounting), no GC, no null, no data races
 - **Natively compiled** — LLVM backend, zero-cost abstractions
 - **Parallel by design** — structured concurrency with `par`, `pmap`, streams
 - **LLM-optimized** — regular syntax, explicit semantics, structured annotations

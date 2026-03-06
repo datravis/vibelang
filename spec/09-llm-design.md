@@ -43,7 +43,7 @@ An LLM can easily append, remove, or reorder stages in this pipeline.
 ### Predictable Scoping
 
 - All bindings are immutable — an LLM never needs to trace mutation.
-- Ownership is explicit — an LLM can verify resource lifetimes by reading signatures.
+- Memory is automatic — no ownership annotations to track or get wrong.
 - Effects are declared in types — an LLM can determine what a function does (I/O, state,
   failure) from its type signature alone.
 

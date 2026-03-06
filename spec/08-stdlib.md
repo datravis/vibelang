@@ -43,7 +43,6 @@ trait Eq[A]
 trait Ord[A]
 trait Show[A]
 trait Hash[A]
-trait Copy[A]
 trait Default[A]
 
 -- Functions
@@ -59,24 +58,24 @@ fn assert(condition: Bool, message: String) -> Unit
 ## 8.3 core.string
 
 ```
-fn length(s: ref String) -> UInt
-fn is_empty(s: ref String) -> Bool
-fn contains(s: ref String, sub: ref String) -> Bool
-fn starts_with(s: ref String, prefix: ref String) -> Bool
-fn ends_with(s: ref String, suffix: ref String) -> Bool
+fn length(s: String) -> UInt
+fn is_empty(s: String) -> Bool
+fn contains(s: String, sub: String) -> Bool
+fn starts_with(s: String, prefix: String) -> Bool
+fn ends_with(s: String, suffix: String) -> Bool
 fn trim(s: String) -> String
 fn trim_start(s: String) -> String
 fn trim_end(s: String) -> String
 fn to_upper(s: String) -> String
 fn to_lower(s: String) -> String
-fn split(s: String, delimiter: ref String) -> List[String]
-fn join(parts: ref List[String], separator: ref String) -> String
-fn replace(s: String, from: ref String, to: ref String) -> String
-fn substring(s: ref String, start: UInt, end: UInt) -> String
-fn chars(s: ref String) -> List[Char]
+fn split(s: String, delimiter: String) -> List[String]
+fn join(parts: List[String], separator: String) -> String
+fn replace(s: String, from: String, to: String) -> String
+fn substring(s: String, start: UInt, end: UInt) -> String
+fn chars(s: String) -> List[Char]
 fn from_chars(chars: List[Char]) -> String
-fn parse_int(s: ref String) -> Option[Int]
-fn parse_float(s: ref String) -> Option[Float]
+fn parse_int(s: String) -> Option[Int]
+fn parse_float(s: String) -> Option[Float]
 ```
 
 ## 8.4 core.collections
@@ -88,14 +87,14 @@ fn empty[A]() -> Vec[A]
 fn singleton[A](value: A) -> Vec[A]
 fn from_list[A](items: List[A]) -> Vec[A]
 fn push[A](vec: Vec[A], value: A) -> Vec[A]
-fn get[A](vec: ref Vec[A], index: UInt) -> Option[A]
+fn get[A](vec: Vec[A], index: UInt) -> Option[A]
 fn set[A](vec: Vec[A], index: UInt, value: A) -> Vec[A]
-fn length[A](vec: ref Vec[A]) -> UInt
+fn length[A](vec: Vec[A]) -> UInt
 fn map[A, B](vec: Vec[A], f: fn(A) -> B) -> Vec[B]
-fn filter[A](vec: Vec[A], pred: fn(ref A) -> Bool) -> Vec[A]
+fn filter[A](vec: Vec[A], pred: fn(A) -> Bool) -> Vec[A]
 fn fold[A, B](vec: Vec[A], init: B, f: fn(B, A) -> B) -> B
 fn concat[A](a: Vec[A], b: Vec[A]) -> Vec[A]
-fn slice[A](vec: ref Vec[A], start: UInt, end: UInt) -> Vec[A]
+fn slice[A](vec: Vec[A], start: UInt, end: UInt) -> Vec[A]
 fn to_list[A](vec: Vec[A]) -> List[A]
 fn to_stream[A](vec: Vec[A]) -> Stream[A]
 ```
@@ -106,16 +105,16 @@ fn to_stream[A](vec: Vec[A]) -> Stream[A]
 fn empty[K, V]() -> Map[K, V]
 fn singleton[K: Hash + Eq, V](key: K, value: V) -> Map[K, V]
 fn insert[K: Hash + Eq, V](m: Map[K, V], key: K, value: V) -> Map[K, V]
-fn get[K: Hash + Eq, V](m: ref Map[K, V], key: ref K) -> Option[ref V]
-fn remove[K: Hash + Eq, V](m: Map[K, V], key: ref K) -> Map[K, V]
-fn contains_key[K: Hash + Eq, V](m: ref Map[K, V], key: ref K) -> Bool
-fn size[K, V](m: ref Map[K, V]) -> UInt
-fn keys[K, V](m: ref Map[K, V]) -> List[K]
-fn values[K, V](m: ref Map[K, V]) -> List[V]
-fn entries[K, V](m: ref Map[K, V]) -> List[(K, V)]
+fn get[K: Hash + Eq, V](m: Map[K, V], key: K) -> Option[V]
+fn remove[K: Hash + Eq, V](m: Map[K, V], key: K) -> Map[K, V]
+fn contains_key[K: Hash + Eq, V](m: Map[K, V], key: K) -> Bool
+fn size[K, V](m: Map[K, V]) -> UInt
+fn keys[K, V](m: Map[K, V]) -> List[K]
+fn values[K, V](m: Map[K, V]) -> List[V]
+fn entries[K, V](m: Map[K, V]) -> List[(K, V)]
 fn merge[K: Hash + Eq, V](a: Map[K, V], b: Map[K, V], resolve: fn(V, V) -> V) -> Map[K, V]
 fn map_values[K, V, W](m: Map[K, V], f: fn(V) -> W) -> Map[K, W]
-fn filter[K: Hash + Eq, V](m: Map[K, V], pred: fn(ref K, ref V) -> Bool) -> Map[K, V]
+fn filter[K: Hash + Eq, V](m: Map[K, V], pred: fn(K, V) -> Bool) -> Map[K, V]
 ```
 
 ### Set[A] — Persistent Hash Set
@@ -124,12 +123,12 @@ fn filter[K: Hash + Eq, V](m: Map[K, V], pred: fn(ref K, ref V) -> Bool) -> Map[
 fn empty[A]() -> Set[A]
 fn singleton[A: Hash + Eq](value: A) -> Set[A]
 fn insert[A: Hash + Eq](s: Set[A], value: A) -> Set[A]
-fn remove[A: Hash + Eq](s: Set[A], value: ref A) -> Set[A]
-fn contains[A: Hash + Eq](s: ref Set[A], value: ref A) -> Bool
-fn size[A](s: ref Set[A]) -> UInt
+fn remove[A: Hash + Eq](s: Set[A], value: A) -> Set[A]
+fn contains[A: Hash + Eq](s: Set[A], value: A) -> Bool
+fn size[A](s: Set[A]) -> UInt
 fn union[A: Hash + Eq](a: Set[A], b: Set[A]) -> Set[A]
-fn intersection[A: Hash + Eq](a: Set[A], b: ref Set[A]) -> Set[A]
-fn difference[A: Hash + Eq](a: Set[A], b: ref Set[A]) -> Set[A]
+fn intersection[A: Hash + Eq](a: Set[A], b: Set[A]) -> Set[A]
+fn difference[A: Hash + Eq](a: Set[A], b: Set[A]) -> Set[A]
 fn to_list[A](s: Set[A]) -> List[A]
 ```
 

@@ -46,8 +46,7 @@ fn_decl        = [ "pub" ], [ "unsafe" ], "fn", IDENT, [ type_params ],
                  [ effect_clause ], "=", expr ;
 
 param_list     = param, { ",", param } ;
-param          = IDENT, ":", [ ownership ], type_expr ;
-ownership      = "own" | "ref" | "share" ;
+param          = IDENT, ":", type_expr ;
 
 effect_clause  = "with", effect_ref, { ",", effect_ref } ;
 effect_ref     = TYPE_IDENT, [ "[", type_expr, { ",", type_expr }, "]" ] ;
@@ -184,9 +183,9 @@ unit_lit       = "(", ")" ;
 and       as        do        effect    else      false     fn
 for       handle    if        impl      in        let       match
 module    newtype   not       of        or        otherwise par
-pmap      pub       ref       region    resume    return    share
-spawn     stream    test      then      trait     true      type
-unsafe    use       when      with
+pmap      pub       region    resume    return    spawn     stream
+test      then      trait     true      type      unsafe    use
+when      with
 ```
 
 ## A.11 File Extension

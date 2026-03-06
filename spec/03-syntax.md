@@ -122,7 +122,7 @@ fn factorial(n: UInt) -> UInt =
 Use `do` blocks to sequence multiple expressions. The last expression is the return value:
 
 ```
-fn process(data: ref Data) -> Result[Output, Error] = do
+fn process(data: Data) -> Result[Output, Error] = do
     let validated = validate(data)
     let transformed = transform(validated)
     let result = encode(transformed)
