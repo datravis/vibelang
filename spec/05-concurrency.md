@@ -12,7 +12,230 @@ provides structured concurrency primitives and a parallel-aware runtime.
 - **Concurrency is structured.** All concurrent computations have a well-defined lifetime
   scoped to their parent.
 
-## 5.2 Parallel Combinators
+## 5.2 The `vibe` Keyword — Concurrent Pipelines
+
+The `vibe` keyword declares a **concurrent data pipeline** — the central abstraction in
+VibeLang. A vibe is a structured, parallel, composable dataflow computation expressed as
+a chain of stages.
+
+```
+vibe word_frequencies =
+    source(read_lines("corpus.txt"))
+    |> map(to_lower)
+    |> flat_map(fn(line) = split(line, " "))
+    |> group_by(identity)
+    |> map(fn((word, occurrences)) = (word, length(occurrences)))
+    |> sort_by(fn((_, count)) = count, descending: true)
+    |> take(100)
+    |> collect
+```
+
+This is the construct that makes VibeLang *VibeLang*. Where other languages treat
+parallelism as an afterthought (thread pools, async/await bolted onto sequential code),
+VibeLang makes **parallel dataflow a first-class language construct**.
+
+### What makes `vibe` special
+
+1. **Automatic parallelism.** The runtime partitions data across cores, parallelizing
+   stages that are safe to parallelize. The programmer describes the *what*; the runtime
+   handles the *how*.
+
+2. **Built-in backpressure.** If a downstream stage is slower than upstream, the pipeline
+   automatically throttles producers. No unbounded queues, no out-of-memory crashes.
+
+3. **Structured lifetime.** A `vibe` is a single structured concurrency scope. When the
+   pipeline completes (or fails), all stages are torn down. No leaked goroutines, no
+   orphaned threads.
+
+4. **Fusion.** The compiler fuses adjacent stateless stages (map, filter) into a single
+   pass, eliminating intermediate allocations. A chain of five `map` calls compiles to
+   one loop.
+
+5. **It's an expression.** A `vibe` evaluates to its terminal value. It can be bound,
+   passed to functions, or composed with other vibes.
+
+### Anatomy of a Vibe
+
+```
+vibe <name> =
+    source(<data>)        -- where data comes from
+    |> <stage>            -- zero or more transformation stages
+    |> <stage>
+    |> <terminal>         -- how to collect the result
+```
+
+A vibe has three parts:
+
+- **Source**: Where data enters the pipeline.
+- **Stages**: Transformations applied to each element (map, filter, window, etc.).
+- **Terminal**: How results are collected (collect, fold, for_each, count, etc.).
+
+### Sources
+
+```
+source(list)                         -- from a List or Vec
+source(range(1, 1_000_000))         -- from a range
+source(read_lines("file.txt"))      -- from a file (lazy, line by line)
+source(channel_receiver)             -- from a channel
+source(iterate(0, fn(n) = n + 1))   -- from an infinite generator
+```
+
+Sources are lazy — they produce values on demand, not all at once.
+
+### Stages
+
+Stages transform data as it flows through the pipeline:
+
+```
+-- Per-element transforms
+|> map(f)                    -- apply f to each element
+|> filter(pred)              -- keep elements where pred is true
+|> flat_map(f)               -- map then flatten
+|> filter_map(f)             -- map, keeping only Some results
+|> inspect(f)                -- side-effect per element (logging), passes through
+
+-- Ordering and uniqueness
+|> sort_by(key_fn)           -- sort (requires finite stream)
+|> distinct                  -- remove duplicates
+|> distinct_by(key_fn)       -- remove duplicates by key
+
+-- Grouping and windowing
+|> group_by(key_fn)          -- group into Map[K, List[V]]
+|> chunk(size)               -- group into fixed-size chunks
+|> window(size, stride)      -- sliding window
+|> batch(timeout, max_size)  -- time-or-size bounded batches
+
+-- Cardinality
+|> take(n)                   -- first n elements
+|> drop(n)                   -- skip first n elements
+|> take_while(pred)          -- take while predicate holds
+|> drop_while(pred)          -- drop while predicate holds
+
+-- Accumulation
+|> scan(init, f)             -- running fold, emitting each intermediate value
+|> zip(other_source)         -- pair elements from two sources
+
+-- Fan-out / fan-in
+|> broadcast(n)              -- duplicate stream to n consumers
+|> merge(other_vibe)         -- interleave elements from another pipeline
+```
+
+### Terminals
+
+Terminals consume the pipeline and produce a final result:
+
+```
+|> collect                   -- List[A]
+|> collect_vec               -- Vec[A]
+|> collect_map(key_fn)       -- Map[K, V]
+|> fold(init, f)             -- single accumulated value
+|> reduce(f)                 -- fold without initial value (requires non-empty)
+|> for_each(f)               -- side-effect per element, returns Unit
+|> count                     -- UInt
+|> any(pred)                 -- Bool
+|> all(pred)                 -- Bool
+|> first                     -- Option[A]
+|> last                      -- Option[A]
+|> min_by(key_fn)            -- Option[A]
+|> max_by(key_fn)            -- Option[A]
+```
+
+### Parallelism Control
+
+By default, the runtime chooses how to parallelize. You can provide hints:
+
+```
+vibe result =
+    source(data)
+    |> parallel(workers: 8, chunk_size: 1000)  -- explicit parallelism hint
+    |> map(expensive_computation)
+    |> filter(is_valid)
+    |> fold(0, fn(a, b) = a + b)
+```
+
+Or force sequential execution:
+
+```
+vibe result =
+    source(data)
+    |> sequential              -- no parallelism, preserve order strictly
+    |> map(computation)
+    |> collect
+```
+
+### Composing Vibes
+
+Vibes are values. They can be composed:
+
+```
+vibe parsed_events =
+    source(read_lines("events.jsonl"))
+    |> filter_map(parse_event)
+
+vibe high_value_events =
+    parsed_events
+    |> filter(fn(e) = e.value > 1000.0)
+    |> collect
+
+vibe event_summary =
+    parsed_events
+    |> group_by(fn(e) = e.action)
+    |> map(fn((action, events)) = (action, length(events)))
+    |> collect_map(fn((k, v)) = (k, v))
+```
+
+### Named Vibes as Reusable Pipelines
+
+Top-level `vibe` declarations can take parameters, creating reusable pipeline templates:
+
+```
+vibe normalize_text(input: List[String]) -> List[String] =
+    source(input)
+    |> map(trim)
+    |> map(to_lower)
+    |> filter(fn(s) = !is_empty(s))
+    |> distinct
+    |> sort_by(identity)
+    |> collect
+
+-- Use it like a function
+let clean_words = normalize_text(raw_words)
+```
+
+### Infinite Vibes
+
+Vibes over infinite sources run until stopped by a cardinality stage or external signal:
+
+```
+vibe sensor_monitor =
+    source(sensor_stream())
+    |> window(100, 1)
+    |> map(fn(readings) = average(readings))
+    |> filter(fn(avg) = avg > threshold)
+    |> for_each(fn(avg) = send_alert(avg))
+```
+
+### Error Handling in Vibes
+
+Vibes interact with the effect system. Stages can perform effects:
+
+```
+vibe processed =
+    source(file_paths)
+    |> map(fn(path) = read_file(path))  -- with IO
+    |> filter_map(fn(result) =
+        match result
+        | Ok(content) -> Some(content)
+        | Err(_) -> None                 -- skip failed reads
+    )
+    |> collect
+```
+
+If a stage panics, the entire vibe is cancelled and the panic propagates to the caller.
+
+## 5.3 Parallel Combinators
+
+For parallelism outside of pipelines, VibeLang provides combinators:
 
 ### par — Parallel Evaluation
 
@@ -44,12 +267,6 @@ let results = pmap(urls, fn(url) = fetch(url))
 let processed = pmap(data, transform, chunk_size: 1000)
 ```
 
-Type signature:
-```
-fn pmap[A, B](items: List[A], f: fn(A) -> B with E) -> List[B] with E
-fn pmap[A, B](items: Array[A], f: fn(A) -> B with E, chunk_size: UInt = auto) -> Array[B] with E
-```
-
 ### pfilter — Parallel Filter
 
 ```
@@ -67,10 +284,6 @@ let total = preduce(numbers, 0, fn(a, b) = a + b)
 The combining function **must be associative**. The compiler does not verify this; incorrect
 results may occur if this contract is violated. Use `reduce` for non-associative operations.
 
-```
-fn preduce[A](items: List[A], identity: A, combine: fn(A, A) -> A) -> A
-```
-
 ### race — First to Complete
 
 Runs multiple computations in parallel and returns the first to complete, cancelling the rest:
@@ -81,60 +294,6 @@ let fastest = race(
     fn() = query_replica_db(id),
     fn() = query_cache(id),
 )
-```
-
-## 5.3 Streams
-
-Streams represent lazy, potentially infinite sequences of values that can be processed
-in a pipeline with automatic parallelism:
-
-```
-type Stream[A]
-
-fn from_list[A](items: List[A]) -> Stream[A]
-fn range(start: Int, end: Int) -> Stream[Int]
-fn repeat[A](value: A) -> Stream[A]            -- infinite
-fn iterate[A](seed: A, f: fn(A) -> A) -> Stream[A]  -- infinite
-```
-
-### Stream Operators
-
-```
-fn map[A, B](s: Stream[A], f: fn(A) -> B) -> Stream[B]
-fn filter[A](s: Stream[A], pred: fn(A) -> Bool) -> Stream[A]
-fn flat_map[A, B](s: Stream[A], f: fn(A) -> Stream[B]) -> Stream[B]
-fn take[A](s: Stream[A], n: UInt) -> Stream[A]
-fn drop[A](s: Stream[A], n: UInt) -> Stream[A]
-fn fold[A, B](s: Stream[A], init: B, f: fn(B, A) -> B) -> B
-fn zip[A, B](a: Stream[A], b: Stream[B]) -> Stream[(A, B)]
-fn chunk[A](s: Stream[A], size: UInt) -> Stream[List[A]]
-fn window[A](s: Stream[A], size: UInt, stride: UInt) -> Stream[List[A]]
-fn scan[A, B](s: Stream[A], init: B, f: fn(B, A) -> B) -> Stream[B]
-fn merge[A](streams: List[Stream[A]]) -> Stream[A]
-```
-
-### Parallel Stream Execution
-
-Streams are sequential by default. Use `.parallel()` to enable parallel execution of
-pipeline stages:
-
-```
-let result = range(1, 1_000_000)
-    |> parallel(chunk_size: 10_000)
-    |> map(expensive_computation)
-    |> filter(is_valid)
-    |> fold(0, fn(acc, x) = acc + x)
-```
-
-### Stream Sinks (Collecting Results)
-
-```
-fn collect[A](s: Stream[A]) -> List[A]
-fn collect_array[A](s: Stream[A]) -> Array[A]
-fn for_each[A](s: Stream[A], f: fn(A) -> Unit with E) -> Unit with E
-fn count[A](s: Stream[A]) -> UInt
-fn any[A](s: Stream[A], pred: fn(A) -> Bool) -> Bool
-fn all[A](s: Stream[A], pred: fn(A) -> Bool) -> Bool
 ```
 
 ## 5.4 Channels
@@ -168,10 +327,20 @@ fn producer_consumer() -> List[Int] with IO = do
     ).1  -- return consumer's result
 ```
 
+Channels can also serve as sources for vibes:
+
+```
+vibe consumer_pipeline =
+    source(rx)
+    |> map(fn(x) = x * 2)
+    |> filter(fn(x) = x > 100)
+    |> collect
+```
+
 ## 5.5 Structured Concurrency
 
 All parallel computations in VibeLang are **structured** — they have a clear parent scope
-and cannot outlive it:
+and cannot outlive it. This applies to `par`, `pmap`, and `vibe` equally:
 
 ```
 fn process_batch(items: List[Item]) -> List[Result] with IO = do
@@ -246,7 +415,20 @@ The VibeLang runtime uses:
 - **Work-stealing thread pool** sized to the number of CPU cores (configurable).
 - **Lightweight tasks** (green threads) multiplexed onto OS threads.
 - **Cache-aware scheduling** that keeps related data on the same core when possible.
-- **Automatic batching** for stream operations to minimize scheduling overhead.
+- **Automatic batching** for `vibe` pipeline stages to minimize scheduling overhead.
+- **Backpressure propagation** through bounded internal buffers between pipeline stages.
 
 The runtime is initialized by `main` and torn down when `main` returns. There is no way
 to access the runtime outside of the effect system.
+
+## 5.8 When to Use What
+
+| Need | Use |
+|------|-----|
+| Transform a data collection through multiple steps | `vibe` pipeline |
+| Run 2-8 independent tasks in parallel | `par` |
+| Apply one function to many items in parallel | `pmap` |
+| Process an infinite/streaming data source | `vibe` with infinite source |
+| Communicate between concurrent tasks | Channels (optionally fed into a `vibe`) |
+| Long-running stateful service | Actor |
+| First result from redundant computations | `race` |

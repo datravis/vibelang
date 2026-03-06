@@ -259,7 +259,33 @@ let user_name = user.name
 let older_user = { user with age: user.age + 1 }
 ```
 
-## 3.8 Modules
+## 3.8 Concurrent Pipelines (`vibe`)
+
+The `vibe` keyword declares a concurrent data pipeline — VibeLang's core abstraction
+for parallel dataflow. See [Chapter 5](05-concurrency.md) for full details.
+
+```
+vibe top_users =
+    source(read_lines("access.log"))
+    |> filter_map(parse_log_entry)
+    |> group_by(fn(entry) = entry.user_id)
+    |> map(fn((uid, entries)) = (uid, length(entries)))
+    |> sort_by(fn((_, count)) = count, descending: true)
+    |> take(10)
+    |> collect
+```
+
+Vibes can take parameters and act as reusable pipeline functions:
+
+```
+vibe search(items: List[Item], query: String) -> List[Item] =
+    source(items)
+    |> filter(fn(item) = contains(item.name, query))
+    |> sort_by(fn(item) = item.relevance, descending: true)
+    |> collect
+```
+
+## 3.9 Modules
 
 Modules provide namespacing and encapsulation:
 
@@ -286,7 +312,7 @@ use math.vector.*            -- import all public items
 use math.vector as v         -- aliased import: v.add(...)
 ```
 
-## 3.9 Operators
+## 3.10 Operators
 
 VibeLang has a fixed, non-overloadable set of operators:
 

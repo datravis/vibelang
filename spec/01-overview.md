@@ -20,8 +20,9 @@ syntax favors regularity, explicitness, and unambiguous structure over brevity o
    memory via region inference and reference counting — no GC, no ownership annotations.
 
 3. **Explicit parallelism, fearless concurrency.** Parallel computation is expressed through
-   structured combinators (`par`, `pmap`, `race`, `stream`), not threads and locks. The
-   runtime schedules work onto OS threads via work-stealing.
+   the `vibe` keyword (concurrent data pipelines) and structured combinators (`par`, `pmap`,
+   `race`), not threads and locks. The runtime schedules work onto OS threads via
+   work-stealing.
 
 4. **Regularity over clevity.** Every construct has exactly one way to express it. No
    operator overloading, no implicit conversions, no method resolution order ambiguity.

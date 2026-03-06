@@ -20,7 +20,8 @@ top_decl       = fn_decl
                | impl_decl
                | effect_decl
                | newtype_decl
-               | alias_decl ;
+               | alias_decl
+               | vibe_decl ;
 ```
 
 ## A.2 Type Declarations
@@ -69,6 +70,19 @@ effect_decl    = "effect", TYPE_IDENT, [ type_params ],
 fn_sig         = "fn", IDENT, [ type_params ],
                  "(", [ param_list ], ")", "->", type_expr ;
 ```
+
+## A.4b Vibe Declarations (Concurrent Pipelines)
+
+```ebnf
+vibe_decl      = "vibe", IDENT, [ "(", param_list, ")" ],
+                 [ "->", type_expr ], "=", vibe_body ;
+vibe_body      = "source", "(", expr, ")", { "|>", expr }, "|>", expr ;
+```
+
+A `vibe` declares a concurrent data pipeline. It is syntactically a chain of expressions
+connected by the pipe operator, beginning with a `source(...)` expression. The final
+pipe stage is the terminal that determines the result type. The runtime automatically
+parallelizes safe stages.
 
 ## A.5 Expressions
 
@@ -183,9 +197,9 @@ unit_lit       = "(", ")" ;
 and       as        do        effect    else      false     fn
 for       handle    if        impl      in        let       match
 module    newtype   not       of        or        otherwise par
-pmap      pub       region    resume    return    spawn     stream
-test      then      trait     true      type      unsafe    use
-when      with
+pmap      pub       region    resume    return    source    spawn
+stream    test      then      trait     true      type      unsafe
+use       vibe      when      with
 ```
 
 ## A.11 File Extension

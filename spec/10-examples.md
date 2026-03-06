@@ -27,35 +27,26 @@ fn main() -> Unit with IO = do
         |> for_each(fn(s) = print(s))
 ```
 
-## 10.3 Parallel Word Count (MapReduce)
+## 10.3 Parallel Word Count (Using `vibe`)
 
 ```vibe
 module word_count
 
 use core.collections.{Map}
 use core.string.{split, to_lower}
-use core.concurrency.{pmap, preduce}
 
-fn count_words(text: String) -> Map[String, UInt] =
-    text
-        |> to_lower
-        |> split(" ")
-        |> fold(Map.empty(), fn(acc, word) =
-            let count = Map.get(acc, word) |> unwrap_or(0)
-            Map.insert(acc, word, count + 1)
-        )
-
-fn merge_counts(a: Map[String, UInt], b: Map[String, UInt]) -> Map[String, UInt] =
-    Map.merge(a, b, fn(x, y) = x + y)
-
-fn parallel_word_count(documents: List[String]) -> Map[String, UInt] =
-    documents
-        |> pmap(count_words)
-        |> preduce(Map.empty(), merge_counts)
+--- Count word frequencies across a list of documents.
+--- The `vibe` pipeline automatically parallelizes the work across cores.
+vibe word_count(documents: List[String]) -> Map[String, UInt] =
+    source(documents)
+    |> flat_map(fn(text) = split(to_lower(text), " "))
+    |> group_by(identity)
+    |> map(fn((word, occurrences)) = (word, length(occurrences)))
+    |> collect_map(fn((k, v)) = (k, v))
 
 fn main() -> Unit with IO = do
     let docs = ["hello world hello", "world goodbye hello", "hello hello world"]
-    let counts = parallel_word_count(docs)
+    let counts = word_count(docs)
     Map.entries(counts)
         |> for_each(fn((word, count)) = print("${word}: ${show(count)}"))
 ```
@@ -102,12 +93,11 @@ fn main() -> Unit with IO = do
     )
 ```
 
-## 10.5 Stream Processing Pipeline
+## 10.5 Stream Processing Pipeline (Using `vibe`)
 
 ```vibe
 module analytics
 
-use core.stream.*
 use core.json.{parse_json, Json}
 use core.time.{Instant, Duration, seconds}
 
@@ -128,24 +118,25 @@ fn parse_event(line: String) -> Option[Event] =
     })
     | Err(_) -> None
 
-fn compute_metrics(events: Stream[Event]) -> Map[String, Float] =
-    events
-        |> parallel(chunk_size: 5000)
-        |> window(1000, 500)
-        |> map(fn(window) = do
-            let total = fold(from_list(window), 0.0, fn(acc, e) = acc + e.value)
-            let count = length(window) |> to_float
-            (total, count)
-        )
-        |> fold(Map.empty(), fn(acc, (total, count)) =
-            Map.insert(acc, "avg", total / count)
-        )
+--- Compute windowed average metrics from a raw event log file.
+--- The `vibe` keyword declares a concurrent pipeline — stages are
+--- automatically parallelized and backpressure is built in.
+vibe compute_metrics(path: String) -> Map[String, Float] =
+    source(read_lines(path))
+    |> filter_map(parse_event)
+    |> parallel(chunk_size: 5000)
+    |> window(1000, 500)
+    |> map(fn(window) = do
+        let total = fold(window, 0.0, fn(acc, e) = acc + e.value)
+        let count = length(window) |> to_float
+        (total, count)
+    )
+    |> fold(Map.empty(), fn(acc, (total, count)) =
+        Map.insert(acc, "avg", total / count)
+    )
 
 fn main() -> Unit with IO = do
-    let events = read_lines_stream("events.jsonl")
-        |> filter_map(parse_event)
-
-    let metrics = compute_metrics(events)
+    let metrics = compute_metrics("events.jsonl")
 
     Map.entries(metrics)
         |> for_each(fn((key, value)) =

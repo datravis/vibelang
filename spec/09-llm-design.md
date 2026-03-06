@@ -28,17 +28,22 @@ VibeLang avoids implicit behavior that requires deep contextual understanding:
 ### Composability
 
 The pipe (`|>`) and compose (`>>`) operators make data flow explicit and linear — ideal
-for LLM generation since the transformation pipeline reads left-to-right, top-to-bottom:
+for LLM generation since the transformation pipeline reads left-to-right, top-to-bottom.
+The `vibe` keyword elevates this pattern into a first-class concurrent pipeline:
 
 ```
-let result = raw_data
+vibe result =
+    source(raw_data)
     |> parse
     |> validate
     |> transform
     |> encode
+    |> collect
 ```
 
-An LLM can easily append, remove, or reorder stages in this pipeline.
+An LLM can easily append, remove, or reorder stages in this pipeline. The `vibe` keyword
+also signals to the LLM that this code is a parallelizable dataflow — not just a chain
+of function calls.
 
 ### Predictable Scoping
 
