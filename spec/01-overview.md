@@ -1,0 +1,50 @@
+# VibeLang Specification v0.1
+
+## 1. Overview
+
+**VibeLang** is a purely functional, natively compiled programming language designed for
+high-performance concurrent and parallel data processing. It combines the memory safety
+guarantees of ownership-based systems (inspired by Rust) with the composability and
+reasoning clarity of purely functional languages (inspired by Haskell, Erlang, and ML).
+
+VibeLang is explicitly designed to be **written and read by both humans and LLMs**. Its
+syntax favors regularity, explicitness, and unambiguous structure over brevity or cleverness.
+
+### 1.1 Design Principles
+
+1. **Pure by default, effects by declaration.** All functions are pure unless they declare
+   an effect signature. Side effects are tracked in the type system via algebraic effects.
+
+2. **Ownership without mutation.** Values have unique owners. When a value is "moved," the
+   old binding becomes inaccessible. Since data is immutable, ownership exists solely to
+   control *when* memory is freed — no borrow checker needed for aliasing safety.
+
+3. **Explicit parallelism, fearless concurrency.** Parallel computation is expressed through
+   structured combinators (`par`, `pmap`, `race`, `stream`), not threads and locks. The
+   runtime schedules work onto OS threads via work-stealing.
+
+4. **Regularity over clevity.** Every construct has exactly one way to express it. No
+   operator overloading, no implicit conversions, no method resolution order ambiguity.
+   LLMs and humans should be able to predict what code does from its syntax alone.
+
+5. **Native compilation.** VibeLang compiles to native machine code via LLVM. There is no
+   interpreter, no VM, no GC. Memory is managed through ownership and region-based
+   allocation.
+
+6. **Turing complete.** VibeLang supports unbounded recursion and is fully Turing complete.
+   Recursive data types and recursive functions are first-class.
+
+### 1.2 Target Use Cases
+
+- Large-scale data transformation pipelines
+- Concurrent service backends
+- Stream processing and real-time analytics
+- Scientific and numerical computation
+- LLM-assisted code generation and transformation
+
+### 1.3 Non-Goals
+
+- Object-oriented programming (no classes, no inheritance, no method dispatch)
+- Untracked side effects (no hidden I/O, no global mutable state)
+- Scripting / REPL-first workflows (compilation is the primary mode)
+- C FFI in v0.1 (planned for v0.2)
