@@ -1,34 +1,43 @@
 # VibeLang
 
-A programming language designed to minimize the distance between intent and implementation.
+A **purely functional** programming language designed to minimize the distance between intent and implementation.
 
-VibeLang is expression-oriented, pattern-match-driven, and pipe-composed — optimized for how a reasoning agent naturally expresses computation.
+VibeLang is expression-oriented, pattern-match-driven, and pipe-composed — optimized for how a reasoning agent naturally expresses computation. All values are immutable. Side effects are tracked in the type system via `IO`.
 
 ## Key Features
 
+- **Purely functional** — all values immutable, functions referentially transparent
 - **Everything is an expression** — no statement/expression divide
 - **Pattern matching** as the primary control flow (`match`)
 - **Pipe operator** (`|>`) for left-to-right data transformation
-- **Algebraic data types** — enums with associated data, structs
-- **Type inference** — types inferred wherever possible
+- **Algebraic data types** — enums with associated data, structs with functional update
+- **Effect system** — IO tracked at the type level, pure and effectful code cleanly separated
+- **Type inference** — Hindley-Milner; types inferred wherever possible
 - **No null** — absence modeled with `Option[T]`
-- **Minimal syntax** — no boilerplate, just the essential logic
+- **Guaranteed tail-call optimization** — recursion replaces loops without stack overflow risk
+- **Persistent data structures** — lists share structure; reference counted
 
 ## Quick Look
 
 ```
-fn fib(n: i64) -> i64 {
-    match n {
-        0 -> 0,
-        1 -> 1,
-        n -> fib(n - 1) + fib(n - 2),
+fn quicksort(xs: List[i64]) -> List[i64] {
+    match xs {
+        [] -> [],
+        pivot :: rest -> {
+            let left = List.filter(rest, |x| x <= pivot);
+            let right = List.filter(rest, |x| x > pivot);
+            quicksort(left) ++ [pivot] ++ quicksort(right)
+        },
     }
 }
 
-fn main() {
-    loop i in 0..10 {
-        fib(i) |> println;
-    };
+fn main() -> IO[unit] {
+    effect {
+        [3, 6, 1, 8, 2, 9, 4, 7, 5]
+            |> quicksort
+            |> List.map(_, to_string)
+            |> List.map(_, println);
+    }
 }
 ```
 
