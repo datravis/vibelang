@@ -1,0 +1,27 @@
+module main
+
+-- Demonstrates region-based memory management.
+-- Records and tuples are allocated in the function's region
+-- and automatically freed when the function returns.
+
+type Point = {
+    x: Int,
+    y: Int
+}
+
+fn make_point(x: Int, y: Int) -> Int =
+    let p = { x: x, y: y }
+    in p.x + p.y
+
+fn nested_alloc(n: Int) -> Int =
+    if n <= 0 then 0
+    else
+        let p = { x: n, y: n * 2 }
+        in p.x + p.y + nested_alloc(n - 1)
+
+fn main() -> Int = do
+    let r1 = make_point(10, 20)
+    print(r1)
+    let r2 = nested_alloc(5)
+    print(r2)
+    0

@@ -1,0 +1,17 @@
+module main
+
+type Shape
+    = | Circle(Int)
+      | Rectangle(Int, Int)
+
+fn area(s: Shape) -> Int =
+    match s
+        | Circle(r) -> r * r * 3
+        | Rectangle(w, h) -> w * h
+
+fn main() -> Int = do
+    let c = Circle(5)
+    let r = Rectangle(4, 6)
+    print(area(c))
+    print(area(r))
+    0

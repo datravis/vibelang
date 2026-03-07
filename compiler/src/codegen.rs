@@ -1,12 +1,13 @@
 use crate::ast::*;
+use crate::memory::{self, EscapeInfo};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module as LLVMModule;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
 };
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue};
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, StructType};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue, IntValue};
 use inkwell::OptimizationLevel;
 use inkwell::passes::PassBuilderOptions;
 use inkwell::{AddressSpace, IntPredicate, FloatPredicate};
@@ -102,6 +103,19 @@ struct Codegen<'ctx> {
     tco_loop_header: Option<inkwell::basic_block::BasicBlock<'ctx>>,
     tco_param_allocs: Vec<PointerValue<'ctx>>,
     tco_fn_name: Option<String>,
+
+    // --- Memory management ---
+    /// Named struct types for records: type_name -> (llvm_struct_type, field_names)
+    record_types: HashMap<String, (StructType<'ctx>, Vec<String>)>,
+    /// Variant type info: variant_type_name -> [(constructor_name, field_count, tag)]
+    variant_types: HashMap<String, Vec<(String, usize, u64)>>,
+    /// Constructor -> (variant_type_name, tag, field_count)
+    constructor_info: HashMap<String, (String, u64, usize)>,
+    /// Region stack: each scope can have a region for arena allocation.
+    /// Stores the region pointer (to a linked list of allocations).
+    region_stack: Vec<Option<PointerValue<'ctx>>>,
+    /// Current escape info for the function being compiled
+    current_escape_info: Option<EscapeInfo>,
 }
 
 impl<'ctx> Codegen<'ctx> {
@@ -127,6 +141,11 @@ impl<'ctx> Codegen<'ctx> {
             tco_loop_header: None,
             tco_param_allocs: Vec::new(),
             tco_fn_name: None,
+            record_types: HashMap::new(),
+            variant_types: HashMap::new(),
+            constructor_info: HashMap::new(),
+            region_stack: Vec::new(),
+            current_escape_info: None,
         })
     }
 
@@ -217,6 +236,13 @@ impl<'ctx> Codegen<'ctx> {
     fn compile_module(&mut self, module: &crate::ast::Module) -> Result<(), CodegenError> {
         self.declare_external_functions();
 
+        // Pass 0: register type definitions (records, variants)
+        for decl in &module.declarations {
+            if let Decl::TypeDef(td) = decl {
+                self.register_type_def(td)?;
+            }
+        }
+
         // First pass: declare all functions
         for decl in &module.declarations {
             if let Decl::Function(f) = decl {
@@ -238,23 +264,351 @@ impl<'ctx> Codegen<'ctx> {
         Ok(())
     }
 
+    /// Register a type definition so codegen knows about record field layouts and variant tags.
+    fn register_type_def(&mut self, td: &TypeDef) -> Result<(), CodegenError> {
+        match &td.body {
+            TypeBody::Record(fields) => {
+                // Create an LLVM struct type for this record.
+                // All fields are i64 for now (we use pointer-sized values for everything).
+                let field_types: Vec<BasicTypeEnum> = fields
+                    .iter()
+                    .map(|_| self.context.i64_type().into())
+                    .collect();
+                let struct_ty = self.context.struct_type(&field_types, false);
+                let field_names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+                self.record_types
+                    .insert(td.name.clone(), (struct_ty, field_names));
+            }
+            TypeBody::Variants(variants) => {
+                let mut variant_info = Vec::new();
+                for (i, v) in variants.iter().enumerate() {
+                    let tag = i as u64;
+                    variant_info.push((v.name.clone(), v.fields.len(), tag));
+                    self.constructor_info
+                        .insert(v.name.clone(), (td.name.clone(), tag, v.fields.len()));
+                }
+                self.variant_types.insert(td.name.clone(), variant_info);
+            }
+            TypeBody::Alias(_) => {
+                // Type aliases don't need codegen registration
+            }
+        }
+        Ok(())
+    }
+
     fn declare_external_functions(&mut self) {
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let i32_ty = self.context.i32_type();
+        let void_ty = self.context.void_type();
+
         // printf for IO
-        let i8_ptr = self.context.ptr_type(AddressSpace::default());
-        let printf_type = self.context.i32_type().fn_type(
-            &[BasicMetadataTypeEnum::PointerType(i8_ptr)],
+        let printf_type = i32_ty.fn_type(
+            &[BasicMetadataTypeEnum::PointerType(ptr_ty)],
             true,
         );
         let printf = self.llvm_module.add_function("printf", printf_type, None);
         self.functions.insert("printf".into(), printf);
 
         // puts
-        let puts_type = self.context.i32_type().fn_type(
-            &[BasicMetadataTypeEnum::PointerType(i8_ptr)],
+        let puts_type = i32_ty.fn_type(
+            &[BasicMetadataTypeEnum::PointerType(ptr_ty)],
             false,
         );
         let puts = self.llvm_module.add_function("puts", puts_type, None);
         self.functions.insert("puts".into(), puts);
+
+        // --- Memory management runtime ---
+
+        // malloc(size) -> ptr
+        let malloc_type = ptr_ty.fn_type(
+            &[BasicMetadataTypeEnum::IntType(i64_ty)],
+            false,
+        );
+        let malloc = self.llvm_module.add_function("malloc", malloc_type, None);
+        self.functions.insert("malloc".into(), malloc);
+
+        // free(ptr) -> void
+        let free_type = void_ty.fn_type(
+            &[BasicMetadataTypeEnum::PointerType(ptr_ty)],
+            false,
+        );
+        let free = self.llvm_module.add_function("free", free_type, None);
+        self.functions.insert("free".into(), free);
+
+        // memcpy(dest, src, n) -> ptr
+        let memcpy_type = ptr_ty.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(ptr_ty),
+                BasicMetadataTypeEnum::PointerType(ptr_ty),
+                BasicMetadataTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let memcpy = self.llvm_module.add_function("memcpy", memcpy_type, None);
+        self.functions.insert("memcpy".into(), memcpy);
+
+        // strlen(s) -> i64
+        let strlen_type = i64_ty.fn_type(
+            &[BasicMetadataTypeEnum::PointerType(ptr_ty)],
+            false,
+        );
+        let strlen = self.llvm_module.add_function("strlen", strlen_type, None);
+        self.functions.insert("strlen".into(), strlen);
+
+        // Declare region management functions (compiled inline as LLVM IR)
+        self.declare_region_runtime();
+        self.declare_refcount_runtime();
+    }
+
+    /// Declare region allocation runtime functions.
+    ///
+    /// A region is a simple arena: a linked list of allocated blocks.
+    /// When the region is destroyed, all blocks are freed at once.
+    ///
+    /// Region node layout: { next: ptr, data: [payload...] }
+    fn declare_region_runtime(&mut self) {
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let void_ty = self.context.void_type();
+
+        // vibe_region_alloc(region_head_ptr: ptr, size: i64) -> ptr
+        // Allocates `size` bytes in the region, prepending to the linked list.
+        let region_alloc_ty = ptr_ty.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(ptr_ty),
+                BasicMetadataTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let region_alloc_fn = self.llvm_module.add_function(
+            "vibe_region_alloc",
+            region_alloc_ty,
+            None,
+        );
+        self.functions.insert("vibe_region_alloc".into(), region_alloc_fn);
+
+        // Build the body: allocate node = malloc(8 + size), set node->next = *head, *head = node, return node+8
+        {
+            let entry = self.context.append_basic_block(region_alloc_fn, "entry");
+            self.builder.position_at_end(entry);
+
+            let head_ptr = region_alloc_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let size = region_alloc_fn.get_nth_param(1).unwrap().into_int_value();
+
+            // total = size + 8 (for next pointer)
+            let eight = i64_ty.const_int(8, false);
+            let total = self.builder.build_int_add(size, eight, "total").unwrap();
+
+            // node = malloc(total)
+            let malloc_fn = self.functions["malloc"];
+            let node = self.builder.build_call(malloc_fn, &[total.into()], "node").unwrap()
+                .try_as_basic_value().left().unwrap().into_pointer_value();
+
+            // node->next = *head_ptr
+            let old_head = self.builder.build_load(ptr_ty, head_ptr, "old_head").unwrap();
+            self.builder.build_store(node, old_head).unwrap();
+
+            // *head_ptr = node
+            self.builder.build_store(head_ptr, node).unwrap();
+
+            // return node + 8 (skip the next pointer to get to data)
+            let data_ptr = unsafe {
+                self.builder.build_gep(self.context.i8_type(), node, &[eight], "data").unwrap()
+            };
+            self.builder.build_return(Some(&data_ptr)).unwrap();
+        }
+
+        // vibe_region_destroy(region_head_ptr: ptr) -> void
+        // Walks the linked list and frees all nodes.
+        let region_destroy_ty = void_ty.fn_type(
+            &[BasicMetadataTypeEnum::PointerType(ptr_ty)],
+            false,
+        );
+        let region_destroy_fn = self.llvm_module.add_function(
+            "vibe_region_destroy",
+            region_destroy_ty,
+            None,
+        );
+        self.functions.insert("vibe_region_destroy".into(), region_destroy_fn);
+
+        {
+            let entry = self.context.append_basic_block(region_destroy_fn, "entry");
+            let loop_bb = self.context.append_basic_block(region_destroy_fn, "loop");
+            let done_bb = self.context.append_basic_block(region_destroy_fn, "done");
+
+            self.builder.position_at_end(entry);
+            let head_ptr = region_destroy_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let current = self.builder.build_load(ptr_ty, head_ptr, "current").unwrap().into_pointer_value();
+            let null = ptr_ty.const_null();
+
+            // Store null to head so region is empty
+            self.builder.build_store(head_ptr, null).unwrap();
+
+            let is_null = self.builder.build_is_null(current, "is_null").unwrap();
+            self.builder.build_conditional_branch(is_null, done_bb, loop_bb).unwrap();
+
+            // Loop: free current, advance to next
+            self.builder.position_at_end(loop_bb);
+            let phi = self.builder.build_phi(ptr_ty, "node").unwrap();
+            phi.add_incoming(&[(&current, entry)]);
+            let node = phi.as_basic_value().into_pointer_value();
+
+            // next = node->next (first field)
+            let next = self.builder.build_load(ptr_ty, node, "next").unwrap().into_pointer_value();
+
+            // free(node)
+            let free_fn = self.functions["free"];
+            self.builder.build_call(free_fn, &[node.into()], "").unwrap();
+
+            let next_null = self.builder.build_is_null(next, "next_null").unwrap();
+            phi.add_incoming(&[(&next, loop_bb)]);
+            self.builder.build_conditional_branch(next_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(done_bb);
+            self.builder.build_return(None).unwrap();
+        }
+    }
+
+    /// Declare reference counting runtime functions.
+    ///
+    /// Refcounted objects have a header: { refcount: i64, tag: i64, region_id: i64 }
+    /// followed by the payload.
+    fn declare_refcount_runtime(&mut self) {
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let void_ty = self.context.void_type();
+
+        // vibe_rc_alloc(size: i64, tag: i64) -> ptr
+        // Allocates a refcounted object: header (24 bytes) + payload (size bytes).
+        // Returns pointer to the payload (past the header).
+        let rc_alloc_ty = ptr_ty.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64_ty),
+                BasicMetadataTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let rc_alloc_fn = self.llvm_module.add_function("vibe_rc_alloc", rc_alloc_ty, None);
+        self.functions.insert("vibe_rc_alloc".into(), rc_alloc_fn);
+
+        {
+            let entry = self.context.append_basic_block(rc_alloc_fn, "entry");
+            self.builder.position_at_end(entry);
+
+            let size = rc_alloc_fn.get_nth_param(0).unwrap().into_int_value();
+            let tag = rc_alloc_fn.get_nth_param(1).unwrap().into_int_value();
+
+            // header_size = 24 (3 * i64)
+            let header_size = i64_ty.const_int(24, false);
+            let total = self.builder.build_int_add(size, header_size, "total").unwrap();
+
+            let malloc_fn = self.functions["malloc"];
+            let raw = self.builder.build_call(malloc_fn, &[total.into()], "raw").unwrap()
+                .try_as_basic_value().left().unwrap().into_pointer_value();
+
+            // Write refcount = 1
+            let one = i64_ty.const_int(1, false);
+            self.builder.build_store(raw, one).unwrap();
+
+            // Write tag at offset 8
+            let tag_ptr = unsafe {
+                self.builder.build_gep(i64_ty, raw, &[i64_ty.const_int(1, false)], "tag_ptr").unwrap()
+            };
+            self.builder.build_store(tag_ptr, tag).unwrap();
+
+            // Write region_id = 0 at offset 16
+            let region_ptr = unsafe {
+                self.builder.build_gep(i64_ty, raw, &[i64_ty.const_int(2, false)], "region_ptr").unwrap()
+            };
+            self.builder.build_store(region_ptr, i64_ty.const_int(0, false)).unwrap();
+
+            // Return pointer past header
+            let payload = unsafe {
+                self.builder.build_gep(self.context.i8_type(), raw, &[header_size], "payload").unwrap()
+            };
+            self.builder.build_return(Some(&payload)).unwrap();
+        }
+
+        // vibe_retain(ptr) -> void
+        // Increments refcount. If ptr is null, no-op.
+        let retain_ty = void_ty.fn_type(
+            &[BasicMetadataTypeEnum::PointerType(ptr_ty)],
+            false,
+        );
+        let retain_fn = self.llvm_module.add_function("vibe_retain", retain_ty, None);
+        self.functions.insert("vibe_retain".into(), retain_fn);
+
+        {
+            let entry = self.context.append_basic_block(retain_fn, "entry");
+            let do_retain = self.context.append_basic_block(retain_fn, "do_retain");
+            let done = self.context.append_basic_block(retain_fn, "done");
+
+            self.builder.position_at_end(entry);
+            let payload_ptr = retain_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let is_null = self.builder.build_is_null(payload_ptr, "is_null").unwrap();
+            self.builder.build_conditional_branch(is_null, done, do_retain).unwrap();
+
+            self.builder.position_at_end(do_retain);
+            // header = payload - 24
+            let header = unsafe {
+                self.builder.build_gep(
+                    self.context.i8_type(), payload_ptr,
+                    &[i64_ty.const_int((-24i64) as u64, true)], "header",
+                ).unwrap()
+            };
+            let rc = self.builder.build_load(i64_ty, header, "rc").unwrap().into_int_value();
+            let new_rc = self.builder.build_int_add(rc, i64_ty.const_int(1, false), "new_rc").unwrap();
+            self.builder.build_store(header, new_rc).unwrap();
+            self.builder.build_unconditional_branch(done).unwrap();
+
+            self.builder.position_at_end(done);
+            self.builder.build_return(None).unwrap();
+        }
+
+        // vibe_release(ptr) -> void
+        // Decrements refcount. If it reaches 0, frees the allocation.
+        let release_ty = void_ty.fn_type(
+            &[BasicMetadataTypeEnum::PointerType(ptr_ty)],
+            false,
+        );
+        let release_fn = self.llvm_module.add_function("vibe_release", release_ty, None);
+        self.functions.insert("vibe_release".into(), release_fn);
+
+        {
+            let entry = self.context.append_basic_block(release_fn, "entry");
+            let do_release = self.context.append_basic_block(release_fn, "do_release");
+            let do_free = self.context.append_basic_block(release_fn, "do_free");
+            let done = self.context.append_basic_block(release_fn, "done");
+
+            self.builder.position_at_end(entry);
+            let payload_ptr = release_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let is_null = self.builder.build_is_null(payload_ptr, "is_null").unwrap();
+            self.builder.build_conditional_branch(is_null, done, do_release).unwrap();
+
+            self.builder.position_at_end(do_release);
+            let header = unsafe {
+                self.builder.build_gep(
+                    self.context.i8_type(), payload_ptr,
+                    &[i64_ty.const_int((-24i64) as u64, true)], "header",
+                ).unwrap()
+            };
+            let rc = self.builder.build_load(i64_ty, header, "rc").unwrap().into_int_value();
+            let new_rc = self.builder.build_int_sub(rc, i64_ty.const_int(1, false), "new_rc").unwrap();
+            self.builder.build_store(header, new_rc).unwrap();
+            let is_zero = self.builder.build_int_compare(
+                IntPredicate::EQ, new_rc, i64_ty.const_int(0, false), "is_zero",
+            ).unwrap();
+            self.builder.build_conditional_branch(is_zero, do_free, done).unwrap();
+
+            self.builder.position_at_end(do_free);
+            let free_fn = self.functions["free"];
+            self.builder.build_call(free_fn, &[header.into()], "").unwrap();
+            self.builder.build_unconditional_branch(done).unwrap();
+
+            self.builder.position_at_end(done);
+            self.builder.build_return(None).unwrap();
+        }
     }
 
     fn declare_function(&mut self, decl: &FnDecl) -> Result<(), CodegenError> {
@@ -317,10 +671,17 @@ impl<'ctx> Codegen<'ctx> {
         let is_tail_recursive =
             !decl.params.is_empty() && Self::has_tail_self_call(&decl.name, &decl.body);
 
+        // Run escape analysis for this function
+        let escape_info = memory::analyze_function(decl);
+        self.current_escape_info = Some(escape_info);
+
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
         self.push_scope();
+
+        // Set up a region for this function scope
+        let region_ptr = self.create_region(function)?;
 
         if is_tail_recursive {
             // TCO: allocate stack slots for params, create loop header
@@ -365,6 +726,7 @@ impl<'ctx> Codegen<'ctx> {
             self.tco_fn_name = None;
 
             // Return (only reached for non-tail-call branches)
+            self.destroy_region(region_ptr)?;
             match result {
                 Some(val) => {
                     self.builder.build_return(Some(&val))
@@ -386,6 +748,7 @@ impl<'ctx> Codegen<'ctx> {
 
             let result = self.compile_expr(&decl.body, function)?;
 
+            self.destroy_region(region_ptr)?;
             match result {
                 Some(val) => {
                     self.builder.build_return(Some(&val))
@@ -400,6 +763,7 @@ impl<'ctx> Codegen<'ctx> {
         }
 
         self.pop_scope();
+        self.current_escape_info = None;
         Ok(())
     }
 
@@ -448,13 +812,6 @@ impl<'ctx> Codegen<'ctx> {
                 } else {
                     Err(CodegenError::UndefinedVar(name.clone()))
                 }
-            }
-
-            Expr::TypeConstructor(name, _) => {
-                // For now, represent constructors as integer tags
-                let tag = name.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-                let val = self.context.i64_type().const_int(tag, false);
-                Ok(Some(val.into()))
             }
 
             Expr::BinOp(lhs, op, rhs, _) => {
@@ -567,6 +924,11 @@ impl<'ctx> Codegen<'ctx> {
             }
 
             Expr::Call(func_expr, args, _) => {
+                // Check if it's a type constructor call like Some(42)
+                if let Expr::TypeConstructor(name, _) = func_expr.as_ref() {
+                    return self.compile_type_constructor(name, args, function);
+                }
+
                 // Check if it's a direct function call
                 if let Expr::Ident(name, _) = func_expr.as_ref() {
                     if name == "print" {
@@ -706,107 +1068,145 @@ impl<'ctx> Codegen<'ctx> {
                 }
 
                 let scrut_val = self.compile_expr(scrutinee, function)?.unwrap();
-
-                // Simple integer matching for now
+                let i64_ty = self.context.i64_type();
                 let merge_bb = self.context.append_basic_block(function, "match.end");
                 let default_bb = self.context.append_basic_block(function, "match.default");
 
-                // Build switch for integer patterns, cascade of ifs otherwise
-                if scrut_val.is_int_value() {
-                    let switch_cases: Vec<_> = arms
-                        .iter()
-                        .filter_map(|arm| {
-                            if let Pattern::IntLit(n, _) = &arm.pattern {
-                                let bb = self.context.append_basic_block(function, "match.arm");
-                                Some((*n, bb, arm))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
+                // Determine if we're matching on constructors (pointer-based, check tag)
+                let has_constructors = arms.iter().any(|a| matches!(&a.pattern, Pattern::Constructor(_, _, _)));
 
-                    // Find default arm (wildcard or ident pattern)
-                    let default_arm = arms.iter().find(|a| {
-                        matches!(&a.pattern, Pattern::Wildcard(_) | Pattern::Ident(_, _))
-                    });
-
-                    let actual_default = if default_arm.is_some() {
-                        default_bb
-                    } else {
-                        default_bb
-                    };
-
-                    let switch = self.builder.build_switch(
-                        scrut_val.into_int_value(),
-                        actual_default,
-                        &switch_cases
-                            .iter()
-                            .map(|(n, bb, _)| {
-                                (self.context.i64_type().const_int(*n as u64, true), *bb)
-                            })
-                            .collect::<Vec<_>>(),
-                    ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
-
-                    let mut phi_incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
-
-                    for (_, bb, arm) in &switch_cases {
-                        self.builder.position_at_end(*bb);
-                        self.push_scope();
-                        let val = self.compile_expr(&arm.body, function)?
-                            .unwrap_or_else(|| self.context.i64_type().const_int(0, false).into());
-                        self.pop_scope();
-                        self.builder.build_unconditional_branch(merge_bb)
-                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                        phi_incoming.push((val, self.builder.get_insert_block().unwrap()));
-                    }
-
-                    // Default block
-                    self.builder.position_at_end(default_bb);
-                    if let Some(arm) = default_arm {
-                        self.push_scope();
-                        if let Pattern::Ident(name, _) = &arm.pattern {
-                            self.set_var(name.clone(), scrut_val);
-                        }
-                        let val = self.compile_expr(&arm.body, function)?
-                            .unwrap_or_else(|| self.context.i64_type().const_int(0, false).into());
-                        self.pop_scope();
-                        self.builder.build_unconditional_branch(merge_bb)
-                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                        phi_incoming.push((val, self.builder.get_insert_block().unwrap()));
-                    } else {
-                        let zero = self.context.i64_type().const_int(0, false);
-                        self.builder.build_unconditional_branch(merge_bb)
-                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                        phi_incoming.push((zero.into(), self.builder.get_insert_block().unwrap()));
-                    }
-
-                    self.builder.position_at_end(merge_bb);
-                    if phi_incoming.is_empty() {
-                        return Ok(Some(self.context.i64_type().const_int(0, false).into()));
-                    }
-                    let phi = self.builder.build_phi(self.context.i64_type(), "match.result")
+                // Get the actual integer to switch on
+                let switch_val = if has_constructors && scrut_val.is_pointer_value() {
+                    // Load the tag from the first field of the struct
+                    let tag = self.builder.build_load(i64_ty, scrut_val.into_pointer_value(), "tag")
                         .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                    for (val, bb) in &phi_incoming {
-                        let i64_val = self.ensure_i64(*val);
-                        phi.add_incoming(&[(&i64_val, *bb)]);
+                    tag.into_int_value()
+                } else if scrut_val.is_int_value() {
+                    let iv = scrut_val.into_int_value();
+                    if iv.get_type().get_bit_width() != 64 {
+                        self.builder.build_int_z_extend(iv, i64_ty, "zext_match")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                    } else {
+                        iv
                     }
-                    Ok(Some(phi.as_basic_value()))
                 } else {
-                    // Fall back: evaluate first arm
-                    self.builder.position_at_end(default_bb);
-                    self.builder.build_unconditional_branch(merge_bb)
+                    // Non-int, non-ptr: fall through to default
+                    self.builder.build_unconditional_branch(default_bb)
                         .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                    self.builder.position_at_end(merge_bb);
 
+                    self.builder.position_at_end(default_bb);
                     if let Some(arm) = arms.first() {
                         self.push_scope();
-                        let val = self.compile_expr(&arm.body, function)?;
+                        let _val = self.compile_expr(&arm.body, function)?;
                         self.pop_scope();
-                        Ok(val)
+                        self.builder.build_unconditional_branch(merge_bb)
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                     } else {
-                        Ok(Some(self.context.i64_type().const_int(0, false).into()))
+                        self.builder.build_unconditional_branch(merge_bb)
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    }
+                    self.builder.position_at_end(merge_bb);
+                    return Ok(Some(i64_ty.const_int(0, false).into()));
+                };
+
+                // Build switch cases
+                let mut switch_cases: Vec<(u64, inkwell::basic_block::BasicBlock<'ctx>, &MatchArm)> = Vec::new();
+
+                for arm in arms {
+                    match &arm.pattern {
+                        Pattern::IntLit(n, _) => {
+                            let bb = self.context.append_basic_block(function, "match.int");
+                            switch_cases.push((*n as u64, bb, arm));
+                        }
+                        Pattern::BoolLit(b, _) => {
+                            let bb = self.context.append_basic_block(function, "match.bool");
+                            switch_cases.push((*b as u64, bb, arm));
+                        }
+                        Pattern::Constructor(name, _, _) => {
+                            let bb = self.context.append_basic_block(function, &format!("match.{name}"));
+                            let tag = if let Some((_, tag, _)) = self.constructor_info.get(name.as_str()).cloned() {
+                                tag
+                            } else {
+                                name.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
+                            };
+                            switch_cases.push((tag, bb, arm));
+                        }
+                        _ => {} // Wildcard/Ident handled as default
                     }
                 }
+
+                let default_arm = arms.iter().find(|a| {
+                    matches!(&a.pattern, Pattern::Wildcard(_) | Pattern::Ident(_, _))
+                });
+
+                self.builder.build_switch(
+                    switch_val,
+                    default_bb,
+                    &switch_cases.iter().map(|(n, bb, _)| (i64_ty.const_int(*n, true), *bb)).collect::<Vec<_>>(),
+                ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+                let mut phi_incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+
+                for (_, bb, arm) in &switch_cases {
+                    self.builder.position_at_end(*bb);
+                    self.push_scope();
+                    // Bind pattern variables
+                    self.bind_pattern_val(&arm.pattern, scrut_val);
+                    let val = self.compile_expr(&arm.body, function)?
+                        .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+                    self.pop_scope();
+                    self.builder.build_unconditional_branch(merge_bb)
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    phi_incoming.push((val, self.builder.get_insert_block().unwrap()));
+                }
+
+                // Default block
+                self.builder.position_at_end(default_bb);
+                if let Some(arm) = default_arm {
+                    self.push_scope();
+                    if let Pattern::Ident(name, _) = &arm.pattern {
+                        self.set_var(name.clone(), scrut_val);
+                    }
+                    let val = self.compile_expr(&arm.body, function)?
+                        .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+                    self.pop_scope();
+                    self.builder.build_unconditional_branch(merge_bb)
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    phi_incoming.push((val, self.builder.get_insert_block().unwrap()));
+                } else {
+                    self.builder.build_unconditional_branch(merge_bb)
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    phi_incoming.push((i64_ty.const_int(0, false).into(), self.builder.get_insert_block().unwrap()));
+                }
+
+                self.builder.position_at_end(merge_bb);
+                if phi_incoming.is_empty() {
+                    return Ok(Some(i64_ty.const_int(0, false).into()));
+                }
+
+                // Determine phi type from first value
+                let first_val = phi_incoming[0].0;
+                let phi_type: BasicTypeEnum = if first_val.is_pointer_value() {
+                    self.context.ptr_type(AddressSpace::default()).into()
+                } else if first_val.is_float_value() {
+                    self.context.f64_type().into()
+                } else {
+                    i64_ty.into()
+                };
+
+                let phi = self.builder.build_phi(phi_type, "match.result")
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+                for (val, bb) in &phi_incoming {
+                    if first_val.is_pointer_value() {
+                        // All values must be pointers
+                        phi.add_incoming(&[(&*val, *bb)]);
+                    } else {
+                        let coerced = self.ensure_i64(*val);
+                        phi.add_incoming(&[(&coerced, *bb)]);
+                    }
+                }
+                Ok(Some(phi.as_basic_value()))
             }
 
             Expr::DoBlock(exprs, _) => {
@@ -885,40 +1285,413 @@ impl<'ctx> Codegen<'ctx> {
             }
 
             Expr::List(elems, _) => {
-                // For now, represent lists as first element or 0
-                if let Some(first) = elems.first() {
-                    self.compile_expr(first, function)
-                } else {
-                    Ok(Some(self.context.i64_type().const_int(0, false).into()))
-                }
+                self.compile_list(elems, function)
             }
 
             Expr::Tuple(elems, _) => {
-                // Compile all elements, return first for now
-                for elem in elems {
-                    self.compile_expr(elem, function)?;
-                }
-                if let Some(first) = elems.first() {
-                    self.compile_expr(first, function)
-                } else {
-                    Ok(Some(self.context.i64_type().const_int(0, false).into()))
-                }
+                self.compile_tuple(elems, function)
             }
 
             Expr::Record(fields, _) => {
-                for (_, expr) in fields {
-                    self.compile_expr(expr, function)?;
-                }
-                Ok(Some(self.context.i64_type().const_int(0, false).into()))
+                self.compile_record(fields, function)
             }
 
-            Expr::RecordUpdate(base, _, _) => self.compile_expr(base, function),
+            Expr::RecordUpdate(base, updates, _) => {
+                self.compile_record_update(base, updates, function)
+            }
 
-            Expr::FieldAccess(base, _, _) => self.compile_expr(base, function),
+            Expr::FieldAccess(base, field, _) => {
+                self.compile_field_access(base, field, function)
+            }
+
+            Expr::TypeConstructor(name, _) => {
+                self.compile_type_constructor(name, &[], function)
+            }
 
             Expr::Handle(expr, _, _) => self.compile_expr(expr, function),
 
             Expr::Resume(expr, _) => self.compile_expr(expr, function),
+        }
+    }
+
+    // ---- Compound type compilation ----
+
+    /// Compile a tuple expression: heap-allocate a struct { elem0, elem1, ... }
+    fn compile_tuple(
+        &mut self,
+        elems: &[Expr],
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        if elems.is_empty() {
+            return Ok(Some(self.context.i64_type().const_int(0, false).into()));
+        }
+
+        let i64_ty = self.context.i64_type();
+
+        // Compile all elements
+        let mut compiled = Vec::new();
+        for e in elems {
+            let val = self.compile_expr(e, function)?.unwrap();
+            compiled.push(val);
+        }
+
+        // Create struct type: { i64, i64, ... } for all elements
+        let field_types: Vec<BasicTypeEnum> = compiled.iter().map(|v| {
+            if v.is_float_value() {
+                self.context.f64_type().into()
+            } else {
+                i64_ty.into()
+            }
+        }).collect();
+        let struct_ty = self.context.struct_type(&field_types, false);
+
+        // Allocate in region
+        let size = i64_ty.const_int((elems.len() * 8) as u64, false);
+        let ptr = self.region_alloc(size, function)?;
+
+        // Store each element
+        for (i, val) in compiled.iter().enumerate() {
+            let elem_ptr = self.builder.build_struct_gep(struct_ty, ptr, i as u32, &format!("tuple.elem.{i}"))
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            let store_val = self.ensure_i64_or_f64(*val);
+            self.builder.build_store(elem_ptr, store_val)
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        }
+
+        Ok(Some(ptr.into()))
+    }
+
+    /// Compile a list expression: linked list of cons cells { value: i64, next: ptr }
+    fn compile_list(
+        &mut self,
+        elems: &[Expr],
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        // cons cell: { value: i64, next: ptr }
+        let cons_ty = self.context.struct_type(
+            &[i64_ty.into(), ptr_ty.into()],
+            false,
+        );
+        let cell_size = i64_ty.const_int(16, false); // 8 + 8
+
+        if elems.is_empty() {
+            return Ok(Some(ptr_ty.const_null().into()));
+        }
+
+        // Build list in reverse (last element first) so we can link them
+        let mut compiled = Vec::new();
+        for e in elems {
+            let val = self.compile_expr(e, function)?.unwrap();
+            compiled.push(val);
+        }
+
+        // Start with null tail
+        let mut current: BasicValueEnum = ptr_ty.const_null().into();
+
+        for val in compiled.iter().rev() {
+            let cell_ptr = self.region_alloc(cell_size, function)?;
+
+            // Store value
+            let val_ptr = self.builder.build_struct_gep(cons_ty, cell_ptr, 0, "cons.val")
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            let store_val = self.ensure_i64(*val);
+            self.builder.build_store(val_ptr, store_val)
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+            // Store next pointer
+            let next_ptr = self.builder.build_struct_gep(cons_ty, cell_ptr, 1, "cons.next")
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            self.builder.build_store(next_ptr, current)
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+            current = cell_ptr.into();
+        }
+
+        Ok(Some(current))
+    }
+
+    /// Compile a record expression: { field1: val1, field2: val2 }
+    fn compile_record(
+        &mut self,
+        fields: &[(String, Expr)],
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+
+        if fields.is_empty() {
+            return Ok(Some(self.context.ptr_type(AddressSpace::default()).const_null().into()));
+        }
+
+        // Compile all field values
+        let mut compiled = Vec::new();
+        for (_, expr) in fields {
+            let val = self.compile_expr(expr, function)?.unwrap();
+            compiled.push(val);
+        }
+
+        // Create anonymous struct type
+        let field_types: Vec<BasicTypeEnum> = (0..fields.len())
+            .map(|_| i64_ty.into())
+            .collect();
+        let struct_ty = self.context.struct_type(&field_types, false);
+
+        // Allocate
+        let size = i64_ty.const_int((fields.len() * 8) as u64, false);
+        let ptr = self.region_alloc(size, function)?;
+
+        // Store each field
+        for (i, val) in compiled.iter().enumerate() {
+            let field_ptr = self.builder.build_struct_gep(struct_ty, ptr, i as u32, &format!("rec.{}", fields[i].0))
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            let store_val = self.ensure_i64(*val);
+            self.builder.build_store(field_ptr, store_val)
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        }
+
+        Ok(Some(ptr.into()))
+    }
+
+    /// Compile a record update: { base | field1: val1 }
+    fn compile_record_update(
+        &mut self,
+        base: &Expr,
+        updates: &[(String, Expr)],
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let base_val = self.compile_expr(base, function)?.unwrap();
+
+        // Try to find a matching record type to know field layout
+        // For now, if we can't find one, fall through to copying
+        for (_type_name, (struct_ty, field_names)) in &self.record_types.clone() {
+            let num_fields = field_names.len();
+            let size = i64_ty.const_int((num_fields * 8) as u64, false);
+            let new_ptr = self.region_alloc(size, function)?;
+
+            // Copy all fields from base
+            let base_ptr = base_val.into_pointer_value();
+            for i in 0..num_fields {
+                let src = self.builder.build_struct_gep(*struct_ty, base_ptr, i as u32, "src")
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                let dst = self.builder.build_struct_gep(*struct_ty, new_ptr, i as u32, "dst")
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                let val = self.builder.build_load(i64_ty, src, "copy")
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                self.builder.build_store(dst, val)
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            }
+
+            // Apply updates
+            for (field_name, expr) in updates {
+                if let Some(idx) = field_names.iter().position(|n| n == field_name) {
+                    let val = self.compile_expr(expr, function)?.unwrap();
+                    let dst = self.builder.build_struct_gep(*struct_ty, new_ptr, idx as u32, "upd")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    let store_val = self.ensure_i64(val);
+                    self.builder.build_store(dst, store_val)
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                }
+            }
+
+            return Ok(Some(new_ptr.into()));
+        }
+
+        // Fallback: just return base
+        Ok(Some(base_val))
+    }
+
+    /// Compile field access: base.field_name
+    fn compile_field_access(
+        &mut self,
+        base: &Expr,
+        field: &str,
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let base_val = self.compile_expr(base, function)?.unwrap();
+
+        if !base_val.is_pointer_value() {
+            return Ok(Some(base_val));
+        }
+
+        let base_ptr = base_val.into_pointer_value();
+
+        // Try to match against known record types
+        for (_type_name, (struct_ty, field_names)) in &self.record_types.clone() {
+            if let Some(idx) = field_names.iter().position(|n| n == field) {
+                let field_ptr = self.builder.build_struct_gep(*struct_ty, base_ptr, idx as u32, &format!("field.{field}"))
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                let val = self.builder.build_load(i64_ty, field_ptr, field)
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                return Ok(Some(val));
+            }
+        }
+
+        // Fallback: try numeric index for tuples (field names like "0", "1", ...)
+        if let Ok(idx) = field.parse::<u32>() {
+            let struct_ty = self.context.struct_type(
+                &vec![i64_ty.into(); (idx + 1) as usize],
+                false,
+            );
+            let field_ptr = self.builder.build_struct_gep(struct_ty, base_ptr, idx, &format!("tuple.{idx}"))
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            let val = self.builder.build_load(i64_ty, field_ptr, "elem")
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            return Ok(Some(val));
+        }
+
+        // Last resort: treat as first field
+        let val = self.builder.build_load(i64_ty, base_ptr, "field")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        Ok(Some(val))
+    }
+
+    /// Compile a type constructor, optionally with arguments.
+    /// e.g., `None` (no args), `Some(42)` (one arg)
+    ///
+    /// Layout: heap struct { tag: i64, field0: i64, field1: i64, ... }
+    fn compile_type_constructor(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+
+        let (tag, expected_fields) = if let Some((_type_name, tag, field_count)) = self.constructor_info.get(name).cloned() {
+            (tag, field_count)
+        } else {
+            // Unknown constructor: use hash-based tag, no fields
+            let tag = name.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+            (tag, args.len())
+        };
+
+        if expected_fields == 0 && args.is_empty() {
+            // Nullary constructor: just return the tag as an i64
+            return Ok(Some(i64_ty.const_int(tag, false).into()));
+        }
+
+        // Compile arguments
+        let mut compiled_args = Vec::new();
+        for a in args {
+            let val = self.compile_expr(a, function)?.unwrap();
+            compiled_args.push(val);
+        }
+
+        // Struct: { tag: i64, field0: i64, ... }
+        let num_fields = 1 + compiled_args.len();
+        let field_types: Vec<BasicTypeEnum> = (0..num_fields)
+            .map(|_| i64_ty.into())
+            .collect();
+        let struct_ty = self.context.struct_type(&field_types, false);
+
+        let size = i64_ty.const_int((num_fields * 8) as u64, false);
+        let ptr = self.region_alloc(size, function)?;
+
+        // Store tag
+        let tag_ptr = self.builder.build_struct_gep(struct_ty, ptr, 0, "ctor.tag")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        self.builder.build_store(tag_ptr, i64_ty.const_int(tag, false))
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        // Store fields
+        for (i, val) in compiled_args.iter().enumerate() {
+            let field_ptr = self.builder.build_struct_gep(struct_ty, ptr, (i + 1) as u32, &format!("ctor.field.{i}"))
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            let store_val = self.ensure_i64(*val);
+            self.builder.build_store(field_ptr, store_val)
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        }
+
+        Ok(Some(ptr.into()))
+    }
+
+    // ---- Memory management helpers ----
+
+    /// Create a region for the current scope. Returns a pointer to the region head.
+    fn create_region(&mut self, _function: FunctionValue<'ctx>) -> Result<PointerValue<'ctx>, CodegenError> {
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let region_head = self.builder.build_alloca(ptr_ty, "region")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        self.builder.build_store(region_head, ptr_ty.const_null())
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        self.region_stack.push(Some(region_head));
+        Ok(region_head)
+    }
+
+    /// Destroy the region, freeing all allocations.
+    fn destroy_region(&mut self, region_ptr: PointerValue<'ctx>) -> Result<(), CodegenError> {
+        let destroy_fn = self.functions["vibe_region_destroy"];
+        self.builder.build_call(destroy_fn, &[region_ptr.into()], "")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        self.region_stack.pop();
+        Ok(())
+    }
+
+    /// Allocate memory in the current region.
+    fn region_alloc(&mut self, size: IntValue<'ctx>, _function: FunctionValue<'ctx>) -> Result<PointerValue<'ctx>, CodegenError> {
+        if let Some(Some(region_ptr)) = self.region_stack.last().copied() {
+            let alloc_fn = self.functions["vibe_region_alloc"];
+            let ptr = self.builder.build_call(alloc_fn, &[region_ptr.into(), size.into()], "ralloc")
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                .try_as_basic_value()
+                .left()
+                .unwrap()
+                .into_pointer_value();
+            Ok(ptr)
+        } else {
+            // No region: fall back to malloc
+            let malloc_fn = self.functions["malloc"];
+            let ptr = self.builder.build_call(malloc_fn, &[size.into()], "malloc")
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                .try_as_basic_value()
+                .left()
+                .unwrap()
+                .into_pointer_value();
+            Ok(ptr)
+        }
+    }
+
+    /// Allocate a refcounted object (for values that escape their region).
+    fn rc_alloc(&mut self, size: IntValue<'ctx>, tag: u64) -> Result<PointerValue<'ctx>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let rc_alloc_fn = self.functions["vibe_rc_alloc"];
+        let ptr = self.builder.build_call(
+            rc_alloc_fn,
+            &[size.into(), i64_ty.const_int(tag, false).into()],
+            "rc_alloc",
+        ).map_err(|e| CodegenError::Llvm(e.to_string()))?
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_pointer_value();
+        Ok(ptr)
+    }
+
+    /// Emit a retain call for a pointer value.
+    fn emit_retain(&mut self, ptr: PointerValue<'ctx>) -> Result<(), CodegenError> {
+        let retain_fn = self.functions["vibe_retain"];
+        self.builder.build_call(retain_fn, &[ptr.into()], "")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Emit a release call for a pointer value.
+    fn emit_release(&mut self, ptr: PointerValue<'ctx>) -> Result<(), CodegenError> {
+        let release_fn = self.functions["vibe_release"];
+        self.builder.build_call(release_fn, &[ptr.into()], "")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Ensure a value is i64 or f64 (passthrough for floats).
+    fn ensure_i64_or_f64(&self, val: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+        if val.is_float_value() {
+            val
+        } else {
+            self.ensure_i64(val)
         }
     }
 
@@ -960,7 +1733,62 @@ impl<'ctx> Codegen<'ctx> {
                 self.set_var(name.clone(), val);
             }
             Pattern::Wildcard(_) => {}
-            _ => {} // More complex patterns would go here
+            Pattern::Tuple(pats, _) => {
+                if val.is_pointer_value() {
+                    let ptr = val.into_pointer_value();
+                    let i64_ty = self.context.i64_type();
+                    let field_types: Vec<BasicTypeEnum> = (0..pats.len())
+                        .map(|_| i64_ty.into())
+                        .collect();
+                    let struct_ty = self.context.struct_type(&field_types, false);
+                    for (i, pat) in pats.iter().enumerate() {
+                        if let Ok(field_ptr) = self.builder.build_struct_gep(struct_ty, ptr, i as u32, &format!("tup.{i}")) {
+                            if let Ok(field_val) = self.builder.build_load(i64_ty, field_ptr, &format!("tup_val.{i}")) {
+                                self.bind_pattern_val(pat, field_val);
+                            }
+                        }
+                    }
+                }
+            }
+            Pattern::Constructor(_name, pats, _) => {
+                if val.is_pointer_value() && !pats.is_empty() {
+                    let ptr = val.into_pointer_value();
+                    let i64_ty = self.context.i64_type();
+                    // Constructor layout: { tag: i64, field0: i64, ... }
+                    let num_fields = 1 + pats.len();
+                    let field_types: Vec<BasicTypeEnum> = (0..num_fields)
+                        .map(|_| i64_ty.into())
+                        .collect();
+                    let struct_ty = self.context.struct_type(&field_types, false);
+                    for (i, pat) in pats.iter().enumerate() {
+                        if let Ok(field_ptr) = self.builder.build_struct_gep(struct_ty, ptr, (i + 1) as u32, &format!("ctor.{i}")) {
+                            if let Ok(field_val) = self.builder.build_load(i64_ty, field_ptr, &format!("ctor_val.{i}")) {
+                                self.bind_pattern_val(pat, field_val);
+                            }
+                        }
+                    }
+                }
+            }
+            Pattern::Record(fields, _) => {
+                if val.is_pointer_value() {
+                    let ptr = val.into_pointer_value();
+                    let i64_ty = self.context.i64_type();
+                    // Try to find matching record type
+                    for (_type_name, (struct_ty, field_names)) in &self.record_types.clone() {
+                        for (field_name, pat) in fields {
+                            if let Some(idx) = field_names.iter().position(|n| n == field_name) {
+                                if let Ok(field_ptr) = self.builder.build_struct_gep(*struct_ty, ptr, idx as u32, field_name) {
+                                    if let Ok(field_val) = self.builder.build_load(i64_ty, field_ptr, &format!("{field_name}_val")) {
+                                        self.bind_pattern_val(pat, field_val);
+                                    }
+                                }
+                            }
+                        }
+                        break; // Use first matching type
+                    }
+                }
+            }
+            _ => {} // Literal patterns are handled by the match switch
         }
     }
 
@@ -1022,10 +1850,19 @@ impl<'ctx> Codegen<'ctx> {
                 "String" => LLVMType::Ptr,
                 "Unit" => LLVMType::I64,
                 "Never" => LLVMType::Void,
-                _ => LLVMType::I64,
+                _ => {
+                    // Check if this is a known record or variant type -> Ptr
+                    if self.record_types.contains_key(name)
+                        || self.variant_types.contains_key(name)
+                    {
+                        LLVMType::Ptr
+                    } else {
+                        LLVMType::I64
+                    }
+                }
             },
             TypeExpr::Unit => LLVMType::I64,
-            TypeExpr::Tuple(_) => LLVMType::I64,
+            TypeExpr::Tuple(_) => LLVMType::Ptr,
             TypeExpr::Function(_, _, _) => LLVMType::Ptr,
             TypeExpr::Record(_, _) => LLVMType::Ptr,
         }

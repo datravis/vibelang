@@ -1,0 +1,10 @@
+module main
+
+fn sum_list(xs: List[Int], acc: Int) -> Int =
+    if xs == 0 then acc
+    else sum_list(xs, acc)
+
+fn main() -> Int = do
+    let nums = [10, 20, 30]
+    print(42)
+    0

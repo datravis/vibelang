@@ -1,0 +1,15 @@
+module main
+
+type Point = {
+    x: Int,
+    y: Int
+}
+
+fn distance_sq(p: Point) -> Int =
+    p.x * p.x + p.y * p.y
+
+fn main() -> Int = do
+    let p = { x: 3, y: 4 }
+    let d = distance_sq(p)
+    print(d)
+    0

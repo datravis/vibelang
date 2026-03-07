@@ -1,6 +1,7 @@
 mod ast;
 mod codegen;
 mod lexer;
+mod memory;
 mod parser;
 mod types;
 

@@ -1,0 +1,10 @@
+module main
+
+fn sum_pair(a: Int, b: Int) -> Int =
+    let pair = (a, b)
+    in a + b
+
+fn main() -> Int = do
+    let result = sum_pair(10, 32)
+    print(result)
+    0
