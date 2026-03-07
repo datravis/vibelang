@@ -116,6 +116,16 @@ struct Codegen<'ctx> {
     region_stack: Vec<Option<PointerValue<'ctx>>>,
     /// Current escape info for the function being compiled
     current_escape_info: Option<EscapeInfo>,
+
+    // --- Effect system ---
+    /// Effect definitions: effect_name -> [(op_name, param_count)]
+    effect_defs: HashMap<String, Vec<(String, usize)>>,
+    /// Effect operation -> (effect_name, op_index, param_count)
+    effect_ops: HashMap<String, (String, usize, usize)>,
+    /// Global handler stack pointer
+    handler_stack_global: Option<PointerValue<'ctx>>,
+    /// Global handler stack top counter
+    handler_top_global: Option<PointerValue<'ctx>>,
 }
 
 impl<'ctx> Codegen<'ctx> {
@@ -146,6 +156,10 @@ impl<'ctx> Codegen<'ctx> {
             constructor_info: HashMap::new(),
             region_stack: Vec::new(),
             current_escape_info: None,
+            effect_defs: HashMap::new(),
+            effect_ops: HashMap::new(),
+            handler_stack_global: None,
+            handler_top_global: None,
         })
     }
 
@@ -235,25 +249,56 @@ impl<'ctx> Codegen<'ctx> {
 
     fn compile_module(&mut self, module: &crate::ast::Module) -> Result<(), CodegenError> {
         self.declare_external_functions();
+        self.declare_effect_runtime();
+        self.declare_concurrency_runtime();
+        self.declare_pipeline_runtime();
 
         // Pass 0: register type definitions (records, variants)
         for decl in &module.declarations {
-            if let Decl::TypeDef(td) = decl {
-                self.register_type_def(td)?;
+            match decl {
+                Decl::TypeDef(td) => self.register_type_def(td)?,
+                Decl::EffectDef(ed) => self.register_effect_def(ed)?,
+                _ => {}
             }
         }
 
-        // First pass: declare all functions
+        // First pass: declare all functions (including vibe declarations)
         for decl in &module.declarations {
-            if let Decl::Function(f) = decl {
-                self.declare_function(f)?;
+            match decl {
+                Decl::Function(f) => self.declare_function(f)?,
+                Decl::VibeDecl(v) => {
+                    let fn_decl = FnDecl {
+                        public: false,
+                        name: v.name.clone(),
+                        params: v.params.clone(),
+                        return_type: v.return_type.clone(),
+                        effects: Vec::new(),
+                        body: v.body.clone(),
+                        span: v.span,
+                    };
+                    self.declare_function(&fn_decl)?;
+                }
+                _ => {}
             }
         }
 
         // Second pass: compile function bodies
         for decl in &module.declarations {
-            if let Decl::Function(f) = decl {
-                self.compile_function(f)?;
+            match decl {
+                Decl::Function(f) => self.compile_function(f)?,
+                Decl::VibeDecl(v) => {
+                    let fn_decl = FnDecl {
+                        public: false,
+                        name: v.name.clone(),
+                        params: v.params.clone(),
+                        return_type: v.return_type.clone(),
+                        effects: Vec::new(),
+                        body: v.body.clone(),
+                        span: v.span,
+                    };
+                    self.compile_function(&fn_decl)?;
+                }
+                _ => {}
             }
         }
 
@@ -261,6 +306,19 @@ impl<'ctx> Codegen<'ctx> {
             CodegenError::Llvm(format!("module verification failed: {}", e.to_string()))
         })?;
 
+        Ok(())
+    }
+
+    fn register_effect_def(&mut self, ed: &EffectDef) -> Result<(), CodegenError> {
+        let mut ops = Vec::new();
+        for (i, op) in ed.operations.iter().enumerate() {
+            ops.push((op.name.clone(), op.params.len()));
+            self.effect_ops.insert(
+                op.name.clone(),
+                (ed.name.clone(), i, op.params.len()),
+            );
+        }
+        self.effect_defs.insert(ed.name.clone(), ops);
         Ok(())
     }
 
@@ -935,6 +993,16 @@ impl<'ctx> Codegen<'ctx> {
                         return self.compile_print(args, function);
                     }
 
+                    // Check if this is an effect operation call
+                    if let Some((effect_name, _op_idx, _param_count)) = self.effect_ops.get(name).cloned() {
+                        return self.compile_perform(&effect_name, name, args, function);
+                    }
+
+                    // Check if this is a pipeline operation (source, map, filter, etc.)
+                    if let Some(result) = self.try_compile_pipeline_call(name, args, function)? {
+                        return Ok(Some(result));
+                    }
+
                     // TCO: if this is a tail-recursive self-call, emit a loop jump
                     if self.tco_fn_name.as_deref() == Some(name.as_str()) {
                         if let Some(loop_header) = self.tco_loop_header {
@@ -1236,10 +1304,101 @@ impl<'ctx> Codegen<'ctx> {
 
             Expr::Pipe(lhs, rhs, _) => {
                 let input = self.compile_expr(lhs, function)?;
-                // Pipe: rhs should be a function, call it with lhs
-                if let Expr::Ident(name, _) = rhs.as_ref() {
-                    if let Some(func) = self.functions.get(name).copied() {
-                        if let Some(input_val) = input {
+
+                // Check if rhs is a pipeline operation like map(f), filter(f), fold(init, f), etc.
+                if let Some(input_val) = input {
+                    if let Expr::Call(func_expr, args, _) = rhs.as_ref() {
+                        if let Expr::Ident(name, _) = func_expr.as_ref() {
+                            let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                            let region_ptr = self.region_stack.last().copied().flatten()
+                                .unwrap_or(ptr_ty.const_null());
+
+                            match name.as_str() {
+                                "map" if !args.is_empty() && input_val.is_pointer_value() => {
+                                    let func_val = self.compile_expr(&args[0], function)?.unwrap();
+                                    if func_val.is_pointer_value() {
+                                        let map_fn = self.functions["vibe_list_map"];
+                                        let result = self.builder.build_call(
+                                            map_fn,
+                                            &[input_val.into(), func_val.into(), region_ptr.into()],
+                                            "pipe_map",
+                                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                        return Ok(result.try_as_basic_value().left());
+                                    }
+                                }
+                                "filter" if !args.is_empty() && input_val.is_pointer_value() => {
+                                    let func_val = self.compile_expr(&args[0], function)?.unwrap();
+                                    if func_val.is_pointer_value() {
+                                        let filter_fn = self.functions["vibe_list_filter"];
+                                        let result = self.builder.build_call(
+                                            filter_fn,
+                                            &[input_val.into(), func_val.into(), region_ptr.into()],
+                                            "pipe_filter",
+                                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                        return Ok(result.try_as_basic_value().left());
+                                    }
+                                }
+                                "fold" if args.len() >= 2 && input_val.is_pointer_value() => {
+                                    let init_val = self.compile_expr(&args[0], function)?.unwrap();
+                                    let func_val = self.compile_expr(&args[1], function)?.unwrap();
+                                    let fold_fn = self.functions["vibe_list_fold"];
+                                    let init_i64 = self.ensure_i64(init_val);
+                                    let result = self.builder.build_call(
+                                        fold_fn,
+                                        &[input_val.into(), init_i64.into(), func_val.into()],
+                                        "pipe_fold",
+                                    ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                    return Ok(result.try_as_basic_value().left());
+                                }
+                                "for_each" if !args.is_empty() && input_val.is_pointer_value() => {
+                                    let func_val = self.compile_expr(&args[0], function)?.unwrap();
+                                    if func_val.is_pointer_value() {
+                                        let foreach_fn = self.functions["vibe_list_for_each"];
+                                        self.builder.build_call(
+                                            foreach_fn,
+                                            &[input_val.into(), func_val.into()],
+                                            "",
+                                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                        let i64_ty = self.context.i64_type();
+                                        return Ok(Some(i64_ty.const_int(0, false).into()));
+                                    }
+                                }
+                                "collect" | "collect_vec" => {
+                                    return Ok(Some(input_val));
+                                }
+                                "count" => {
+                                    if input_val.is_pointer_value() {
+                                        let len_fn = self.functions["vibe_list_length"];
+                                        let result = self.builder.build_call(
+                                            len_fn, &[input_val.into()], "pipe_count",
+                                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                        return Ok(result.try_as_basic_value().left());
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    // Handle pipe to identifiers: collect, count, first, last
+                    if let Expr::Ident(name, _) = rhs.as_ref() {
+                        match name.as_str() {
+                            "collect" | "collect_vec" => {
+                                return Ok(Some(input_val));
+                            }
+                            "count" => {
+                                if input_val.is_pointer_value() {
+                                    let len_fn = self.functions["vibe_list_length"];
+                                    let result = self.builder.build_call(
+                                        len_fn, &[input_val.into()], "pipe_count",
+                                    ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                    return Ok(result.try_as_basic_value().left());
+                                }
+                            }
+                            _ => {}
+                        }
+
+                        if let Some(func) = self.functions.get(name).copied() {
                             let result = self
                                 .builder
                                 .build_call(func, &[input_val.into()], "pipe")
@@ -1248,6 +1407,7 @@ impl<'ctx> Codegen<'ctx> {
                         }
                     }
                 }
+
                 // Fallback: just evaluate rhs
                 self.compile_expr(rhs, function)
             }
@@ -1308,9 +1468,30 @@ impl<'ctx> Codegen<'ctx> {
                 self.compile_type_constructor(name, &[], function)
             }
 
-            Expr::Handle(expr, _, _) => self.compile_expr(expr, function),
+            Expr::Handle(body_expr, handlers, _) => {
+                self.compile_handle(body_expr, handlers, function)
+            }
 
-            Expr::Resume(expr, _) => self.compile_expr(expr, function),
+            Expr::Resume(expr, _) => {
+                // Resume returns the value from the handler — just evaluate and return
+                self.compile_expr(expr, function)
+            }
+
+            Expr::Perform(effect_name, op_name, args, _) => {
+                self.compile_perform(effect_name, op_name, args, function)
+            }
+
+            Expr::Par(exprs, _) => {
+                self.compile_par(exprs, function)
+            }
+
+            Expr::Pmap(collection, func, _) => {
+                self.compile_pmap(collection, func, function)
+            }
+
+            Expr::VibePipeline(source, stages, _) => {
+                self.compile_vibe_pipeline(source, stages, function)
+            }
         }
     }
 
@@ -1693,6 +1874,1067 @@ impl<'ctx> Codegen<'ctx> {
         } else {
             self.ensure_i64(val)
         }
+    }
+
+    // ============================================================
+    // Effect System Runtime
+    // ============================================================
+
+    /// Declare the effect handler runtime: global handler stack + push/pop/perform functions.
+    ///
+    /// Handler entry layout: { effect_hash: i64, op_hash: i64, handler_fn: ptr, user_data: ptr }
+    /// Handler stack: global array of 256 entries
+    /// Handler top: global i64 counter
+    fn declare_effect_runtime(&mut self) {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let void_ty = self.context.void_type();
+
+        // Handler entry struct: { effect_hash: i64, op_hash: i64, handler_fn: ptr, user_data: ptr }
+        let handler_entry_ty = self.context.struct_type(
+            &[i64_ty.into(), i64_ty.into(), ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+
+        // Global handler stack: [256 x handler_entry]
+        let stack_ty = handler_entry_ty.array_type(256);
+        let handler_stack = self.llvm_module.add_global(stack_ty, None, "vibe_handler_stack");
+        handler_stack.set_initializer(&stack_ty.const_zero());
+        handler_stack.set_linkage(inkwell::module::Linkage::Internal);
+        self.handler_stack_global = Some(handler_stack.as_pointer_value());
+
+        // Global handler top counter
+        let handler_top = self.llvm_module.add_global(i64_ty, None, "vibe_handler_top");
+        handler_top.set_initializer(&i64_ty.const_int(0, false));
+        handler_top.set_linkage(inkwell::module::Linkage::Internal);
+        self.handler_top_global = Some(handler_top.as_pointer_value());
+
+        // vibe_handler_push(effect_hash: i64, op_hash: i64, handler_fn: ptr, user_data: ptr)
+        let push_ty = void_ty.fn_type(
+            &[i64_ty.into(), i64_ty.into(), ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        let push_fn = self.llvm_module.add_function("vibe_handler_push", push_ty, None);
+        self.functions.insert("vibe_handler_push".into(), push_fn);
+
+        {
+            let entry = self.context.append_basic_block(push_fn, "entry");
+            self.builder.position_at_end(entry);
+
+            let effect_hash = push_fn.get_nth_param(0).unwrap().into_int_value();
+            let op_hash = push_fn.get_nth_param(1).unwrap().into_int_value();
+            let handler_fn_param = push_fn.get_nth_param(2).unwrap().into_pointer_value();
+            let user_data = push_fn.get_nth_param(3).unwrap().into_pointer_value();
+
+            let top_ptr = self.handler_top_global.unwrap();
+            let top = self.builder.build_load(i64_ty, top_ptr, "top").unwrap().into_int_value();
+
+            let stack_ptr = self.handler_stack_global.unwrap();
+            let stack_array_ty = handler_entry_ty.array_type(256);
+
+            // entry_ptr = &handler_stack[0][top]
+            let entry_ptr = unsafe {
+                self.builder.build_gep(stack_array_ty, stack_ptr, &[i64_ty.const_int(0, false), top], "entry_ptr").unwrap()
+            };
+
+            // Store fields
+            let f0 = self.builder.build_struct_gep(handler_entry_ty, entry_ptr, 0, "f0").unwrap();
+            self.builder.build_store(f0, effect_hash).unwrap();
+            let f1 = self.builder.build_struct_gep(handler_entry_ty, entry_ptr, 1, "f1").unwrap();
+            self.builder.build_store(f1, op_hash).unwrap();
+            let f2 = self.builder.build_struct_gep(handler_entry_ty, entry_ptr, 2, "f2").unwrap();
+            self.builder.build_store(f2, handler_fn_param).unwrap();
+            let f3 = self.builder.build_struct_gep(handler_entry_ty, entry_ptr, 3, "f3").unwrap();
+            self.builder.build_store(f3, user_data).unwrap();
+
+            // top++
+            let new_top = self.builder.build_int_add(top, i64_ty.const_int(1, false), "new_top").unwrap();
+            self.builder.build_store(top_ptr, new_top).unwrap();
+
+            self.builder.build_return(None).unwrap();
+        }
+
+        // vibe_handler_pop(count: i64)
+        let pop_ty = void_ty.fn_type(&[i64_ty.into()], false);
+        let pop_fn = self.llvm_module.add_function("vibe_handler_pop", pop_ty, None);
+        self.functions.insert("vibe_handler_pop".into(), pop_fn);
+
+        {
+            let entry = self.context.append_basic_block(pop_fn, "entry");
+            self.builder.position_at_end(entry);
+
+            let count = pop_fn.get_nth_param(0).unwrap().into_int_value();
+            let top_ptr = self.handler_top_global.unwrap();
+            let top = self.builder.build_load(i64_ty, top_ptr, "top").unwrap().into_int_value();
+            let new_top = self.builder.build_int_sub(top, count, "new_top").unwrap();
+            self.builder.build_store(top_ptr, new_top).unwrap();
+            self.builder.build_return(None).unwrap();
+        }
+
+        // vibe_handler_perform(effect_hash: i64, op_hash: i64, arg: i64) -> i64
+        // Searches the handler stack from top down, calls matching handler
+        let perform_ty = i64_ty.fn_type(
+            &[i64_ty.into(), i64_ty.into(), i64_ty.into()],
+            false,
+        );
+        let perform_fn = self.llvm_module.add_function("vibe_handler_perform", perform_ty, None);
+        self.functions.insert("vibe_handler_perform".into(), perform_fn);
+
+        {
+            let entry = self.context.append_basic_block(perform_fn, "entry");
+            let loop_bb = self.context.append_basic_block(perform_fn, "loop");
+            let found_bb = self.context.append_basic_block(perform_fn, "found");
+            let not_found_bb = self.context.append_basic_block(perform_fn, "not_found");
+
+            self.builder.position_at_end(entry);
+            let eff_hash = perform_fn.get_nth_param(0).unwrap().into_int_value();
+            let o_hash = perform_fn.get_nth_param(1).unwrap().into_int_value();
+            let arg = perform_fn.get_nth_param(2).unwrap().into_int_value();
+
+            let top_ptr = self.handler_top_global.unwrap();
+            let top = self.builder.build_load(i64_ty, top_ptr, "top").unwrap().into_int_value();
+
+            // Start from top - 1
+            let start_idx = self.builder.build_int_sub(top, i64_ty.const_int(1, false), "start").unwrap();
+            self.builder.build_unconditional_branch(loop_bb).unwrap();
+
+            // Loop: search handler stack
+            self.builder.position_at_end(loop_bb);
+            let idx_phi = self.builder.build_phi(i64_ty, "idx").unwrap();
+            idx_phi.add_incoming(&[(&start_idx, entry)]);
+            let idx = idx_phi.as_basic_value().into_int_value();
+
+            // Check bounds: idx < 0 means not found
+            let is_negative = self.builder.build_int_compare(
+                IntPredicate::SLT, idx, i64_ty.const_int(0, false), "neg",
+            ).unwrap();
+            self.builder.build_conditional_branch(is_negative, not_found_bb, found_bb).unwrap();
+
+            // Check if handler matches
+            self.builder.position_at_end(found_bb);
+            let stack_ptr = self.handler_stack_global.unwrap();
+            let stack_array_ty = handler_entry_ty.array_type(256);
+            let ep = unsafe {
+                self.builder.build_gep(stack_array_ty, stack_ptr, &[i64_ty.const_int(0, false), idx], "ep").unwrap()
+            };
+
+            let stored_eff = self.builder.build_load(
+                i64_ty,
+                self.builder.build_struct_gep(handler_entry_ty, ep, 0, "eff_ptr").unwrap(),
+                "stored_eff",
+            ).unwrap().into_int_value();
+            let stored_op = self.builder.build_load(
+                i64_ty,
+                self.builder.build_struct_gep(handler_entry_ty, ep, 1, "op_ptr").unwrap(),
+                "stored_op",
+            ).unwrap().into_int_value();
+
+            let eff_match = self.builder.build_int_compare(IntPredicate::EQ, stored_eff, eff_hash, "eff_eq").unwrap();
+            let op_match = self.builder.build_int_compare(IntPredicate::EQ, stored_op, o_hash, "op_eq").unwrap();
+            let both_match = self.builder.build_and(eff_match, op_match, "match").unwrap();
+
+            let call_bb = self.context.append_basic_block(perform_fn, "call");
+            let next_bb = self.context.append_basic_block(perform_fn, "next");
+            self.builder.build_conditional_branch(both_match, call_bb, next_bb).unwrap();
+
+            // Call the handler
+            self.builder.position_at_end(call_bb);
+            let handler_fn_ptr = self.builder.build_load(
+                ptr_ty,
+                self.builder.build_struct_gep(handler_entry_ty, ep, 2, "fn_ptr").unwrap(),
+                "handler_fn",
+            ).unwrap().into_pointer_value();
+            let user_data_val = self.builder.build_load(
+                ptr_ty,
+                self.builder.build_struct_gep(handler_entry_ty, ep, 3, "ud_ptr").unwrap(),
+                "user_data",
+            ).unwrap().into_pointer_value();
+
+            // Call handler(arg, user_data) -> i64
+            let handler_fn_ty = i64_ty.fn_type(&[i64_ty.into(), ptr_ty.into()], false);
+            let result = self.builder.build_indirect_call(
+                handler_fn_ty, handler_fn_ptr, &[arg.into(), user_data_val.into()], "result",
+            ).unwrap();
+            let result_val = result.try_as_basic_value().left().unwrap();
+            self.builder.build_return(Some(&result_val)).unwrap();
+
+            // Continue searching
+            self.builder.position_at_end(next_bb);
+            let next_idx = self.builder.build_int_sub(idx, i64_ty.const_int(1, false), "next_idx").unwrap();
+            idx_phi.add_incoming(&[(&next_idx, next_bb)]);
+            self.builder.build_unconditional_branch(loop_bb).unwrap();
+
+            // Not found: return 0 (no handler)
+            self.builder.position_at_end(not_found_bb);
+            self.builder.build_return(Some(&i64_ty.const_int(0, false))).unwrap();
+        }
+    }
+
+    /// Compile a handle expression: push handlers, run body, pop handlers
+    fn compile_handle(
+        &mut self,
+        body_expr: &Expr,
+        handlers: &[Handler],
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let push_fn = self.functions["vibe_handler_push"];
+        let pop_fn = self.functions["vibe_handler_pop"];
+
+        let handler_count = handlers.len();
+
+        // For each handler, compile the handler body as a separate function
+        // Handler function signature: fn(arg: i64, user_data: ptr) -> i64
+        for handler in handlers {
+            let effect_hash = Self::hash_name(&handler.effect_name);
+            let op_hash = Self::hash_name(&handler.operation);
+
+            // Compile handler body as lambda
+            let handler_fn_ty = i64_ty.fn_type(&[i64_ty.into(), ptr_ty.into()], false);
+            let handler_fn_name = format!("handler_{}_{}", handler.effect_name, handler.operation);
+            let handler_fn = self.llvm_module.add_function(&handler_fn_name, handler_fn_ty, None);
+
+            let prev_bb = self.builder.get_insert_block();
+            let handler_entry = self.context.append_basic_block(handler_fn, "entry");
+            self.builder.position_at_end(handler_entry);
+
+            self.push_scope();
+
+            // Bind handler parameters to the arg value
+            let arg_val = handler_fn.get_nth_param(0).unwrap();
+            let _user_data = handler_fn.get_nth_param(1).unwrap();
+
+            // If handler has params, bind the first one to arg
+            if let Some(param_name) = handler.params.first() {
+                self.set_var(param_name.clone(), arg_val);
+            }
+
+            // Compile handler body
+            let result = self.compile_expr(&handler.body, handler_fn)?;
+            let ret_val = result.unwrap_or_else(|| i64_ty.const_int(0, false).into());
+            let ret_val = self.ensure_i64(ret_val);
+            self.builder.build_return(Some(&ret_val))
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+            self.pop_scope();
+
+            if let Some(bb) = prev_bb {
+                self.builder.position_at_end(bb);
+            }
+
+            // Push this handler onto the stack
+            self.builder.build_call(
+                push_fn,
+                &[
+                    i64_ty.const_int(effect_hash, false).into(),
+                    i64_ty.const_int(op_hash, false).into(),
+                    handler_fn.as_global_value().as_pointer_value().into(),
+                    ptr_ty.const_null().into(),
+                ],
+                "",
+            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        }
+
+        // Compile the body expression
+        let result = self.compile_expr(body_expr, function)?;
+
+        // Pop all handlers
+        self.builder.build_call(
+            pop_fn,
+            &[i64_ty.const_int(handler_count as u64, false).into()],
+            "",
+        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        Ok(result)
+    }
+
+    /// Compile an effect operation: look up handler and call it
+    fn compile_perform(
+        &mut self,
+        effect_name: &str,
+        op_name: &str,
+        args: &[Expr],
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let perform_fn = self.functions["vibe_handler_perform"];
+
+        let effect_hash = Self::hash_name(effect_name);
+        let op_hash = Self::hash_name(op_name);
+
+        // Compile the first argument (or 0 if no args)
+        let arg_val = if let Some(first_arg) = args.first() {
+            let val = self.compile_expr(first_arg, function)?.unwrap();
+            self.ensure_i64(val)
+        } else {
+            i64_ty.const_int(0, false).into()
+        };
+
+        let result = self.builder.build_call(
+            perform_fn,
+            &[
+                i64_ty.const_int(effect_hash, false).into(),
+                i64_ty.const_int(op_hash, false).into(),
+                arg_val.into(),
+            ],
+            "perform_result",
+        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        Ok(result.try_as_basic_value().left())
+    }
+
+    /// Hash a name to a u64 for handler lookup
+    fn hash_name(name: &str) -> u64 {
+        name.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
+    }
+
+    // ============================================================
+    // Concurrency Runtime
+    // ============================================================
+
+    /// Declare threading runtime using pthreads
+    fn declare_concurrency_runtime(&mut self) {
+        let i64_ty = self.context.i64_type();
+        let i32_ty = self.context.i32_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        // pthread_create(thread: ptr, attr: ptr, start_routine: ptr, arg: ptr) -> i32
+        let pthread_create_ty = i32_ty.fn_type(
+            &[ptr_ty.into(), ptr_ty.into(), ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        let pthread_create = self.llvm_module.add_function("pthread_create", pthread_create_ty, None);
+        self.functions.insert("pthread_create".into(), pthread_create);
+
+        // pthread_join(thread: i64, retval: ptr) -> i32
+        let pthread_join_ty = i32_ty.fn_type(
+            &[i64_ty.into(), ptr_ty.into()],
+            false,
+        );
+        let pthread_join = self.llvm_module.add_function("pthread_join", pthread_join_ty, None);
+        self.functions.insert("pthread_join".into(), pthread_join);
+
+        // Thread wrapper: struct { fn_ptr: ptr, result: i64 }
+        // vibe_thread_entry(arg: ptr) -> ptr
+        // Calls the function pointer stored in arg, stores result
+        let thread_entry_ty = ptr_ty.fn_type(&[ptr_ty.into()], false);
+        let thread_entry = self.llvm_module.add_function("vibe_thread_entry", thread_entry_ty, None);
+        self.functions.insert("vibe_thread_entry".into(), thread_entry);
+
+        {
+            let entry = self.context.append_basic_block(thread_entry, "entry");
+            self.builder.position_at_end(entry);
+
+            let arg_ptr = thread_entry.get_nth_param(0).unwrap().into_pointer_value();
+
+            // struct layout: { fn_ptr: ptr, result: i64 }
+            let task_struct_ty = self.context.struct_type(
+                &[ptr_ty.into(), i64_ty.into()],
+                false,
+            );
+
+            // Load fn_ptr
+            let fn_ptr_ptr = self.builder.build_struct_gep(task_struct_ty, arg_ptr, 0, "fn_ptr_ptr").unwrap();
+            let fn_ptr = self.builder.build_load(ptr_ty, fn_ptr_ptr, "fn_ptr").unwrap().into_pointer_value();
+
+            // Call the thunk: fn() -> i64
+            let thunk_ty = i64_ty.fn_type(&[], false);
+            let result = self.builder.build_indirect_call(thunk_ty, fn_ptr, &[], "thunk_result").unwrap();
+            let result_val = result.try_as_basic_value().left()
+                .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+
+            // Store result
+            let result_ptr = self.builder.build_struct_gep(task_struct_ty, arg_ptr, 1, "result_ptr").unwrap();
+            self.builder.build_store(result_ptr, result_val).unwrap();
+
+            self.builder.build_return(Some(&ptr_ty.const_null())).unwrap();
+        }
+    }
+
+    /// Compile par(expr1, expr2, ...) — parallel evaluation of expressions
+    fn compile_par(
+        &mut self,
+        exprs: &[Expr],
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        let task_struct_ty = self.context.struct_type(
+            &[ptr_ty.into(), i64_ty.into()],
+            false,
+        );
+        let task_struct_size = i64_ty.const_int(16, false); // ptr(8) + i64(8)
+
+        let malloc_fn = self.functions["malloc"];
+        let free_fn = self.functions["free"];
+        let pthread_create_fn = self.functions["pthread_create"];
+        let pthread_join_fn = self.functions["pthread_join"];
+        let thread_entry_fn = self.functions["vibe_thread_entry"];
+
+        // For each expression, compile it as a thunk (no-arg lambda)
+        let mut thunk_fns = Vec::new();
+        for (i, expr) in exprs.iter().enumerate() {
+            let thunk_ty = i64_ty.fn_type(&[], false);
+            let thunk_name = format!("par_thunk_{i}");
+            let thunk_fn = self.llvm_module.add_function(&thunk_name, thunk_ty, None);
+
+            let prev_bb = self.builder.get_insert_block();
+            let thunk_entry = self.context.append_basic_block(thunk_fn, "entry");
+            self.builder.position_at_end(thunk_entry);
+
+            self.push_scope();
+            let result = self.compile_expr(expr, thunk_fn)?;
+            let ret_val = result.unwrap_or_else(|| i64_ty.const_int(0, false).into());
+            let ret_val = self.ensure_i64(ret_val);
+            self.builder.build_return(Some(&ret_val))
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            self.pop_scope();
+
+            if let Some(bb) = prev_bb {
+                self.builder.position_at_end(bb);
+            }
+            thunk_fns.push(thunk_fn);
+        }
+
+        // Allocate task structs and thread handles
+        let mut task_ptrs = Vec::new();
+        let mut thread_allocs = Vec::new();
+
+        for (i, thunk_fn) in thunk_fns.iter().enumerate() {
+            // Allocate task struct
+            let task_ptr = self.builder.build_call(malloc_fn, &[task_struct_size.into()], &format!("task_{i}"))
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                .try_as_basic_value().left().unwrap().into_pointer_value();
+
+            // Store fn_ptr
+            let fn_ptr_field = self.builder.build_struct_gep(task_struct_ty, task_ptr, 0, "fn_field")
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            self.builder.build_store(fn_ptr_field, thunk_fn.as_global_value().as_pointer_value())
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+            // Initialize result to 0
+            let res_field = self.builder.build_struct_gep(task_struct_ty, task_ptr, 1, "res_field")
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            self.builder.build_store(res_field, i64_ty.const_int(0, false))
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+            // Allocate thread handle (pthread_t is i64 on most platforms)
+            let thread_alloc = self.builder.build_alloca(i64_ty, &format!("thread_{i}"))
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+            // pthread_create(&thread, NULL, thread_entry, task_ptr)
+            self.builder.build_call(
+                pthread_create_fn,
+                &[
+                    thread_alloc.into(),
+                    ptr_ty.const_null().into(),
+                    thread_entry_fn.as_global_value().as_pointer_value().into(),
+                    task_ptr.into(),
+                ],
+                &format!("create_{i}"),
+            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+            task_ptrs.push(task_ptr);
+            thread_allocs.push(thread_alloc);
+        }
+
+        // Join all threads and collect results
+        let mut results = Vec::new();
+        for (i, (task_ptr, thread_alloc)) in task_ptrs.iter().zip(thread_allocs.iter()).enumerate() {
+            let thread_handle = self.builder.build_load(i64_ty, *thread_alloc, &format!("th_{i}"))
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            self.builder.build_call(
+                pthread_join_fn,
+                &[thread_handle.into(), ptr_ty.const_null().into()],
+                &format!("join_{i}"),
+            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+            // Read result from task struct
+            let res_field = self.builder.build_struct_gep(task_struct_ty, *task_ptr, 1, &format!("res_{i}"))
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            let result_val = self.builder.build_load(i64_ty, res_field, &format!("result_{i}"))
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            results.push(result_val);
+
+            // Free task struct
+            self.builder.build_call(free_fn, &[(*task_ptr).into()], "")
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        }
+
+        // Pack results into a tuple
+        if results.len() == 1 {
+            Ok(Some(results[0]))
+        } else {
+            let field_types: Vec<BasicTypeEnum> = results.iter().map(|_| i64_ty.into()).collect();
+            let tuple_ty = self.context.struct_type(&field_types, false);
+            let size = i64_ty.const_int((results.len() * 8) as u64, false);
+            let tuple_ptr = self.region_alloc(size, function)?;
+
+            for (i, val) in results.iter().enumerate() {
+                let field_ptr = self.builder.build_struct_gep(tuple_ty, tuple_ptr, i as u32, &format!("par_result_{i}"))
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                self.builder.build_store(field_ptr, *val)
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            }
+
+            Ok(Some(tuple_ptr.into()))
+        }
+    }
+
+    /// Compile pmap(collection, function) — parallel map over a list
+    fn compile_pmap(
+        &mut self,
+        collection: &Expr,
+        func: &Expr,
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        // For v0.1, implement pmap as sequential map with threading infrastructure
+        // Compile collection and function
+        let col_val = self.compile_expr(collection, function)?.unwrap();
+        let func_val = self.compile_expr(func, function)?.unwrap();
+
+        // Use the vibe_list_map runtime function
+        if let Some(map_fn) = self.functions.get("vibe_list_map").copied() {
+            let func_ptr = if func_val.is_pointer_value() {
+                func_val.into_pointer_value()
+            } else {
+                return Err(CodegenError::Unsupported("pmap requires a function".into()));
+            };
+
+            let col_ptr = if col_val.is_pointer_value() {
+                col_val.into_pointer_value()
+            } else {
+                return Ok(Some(col_val));
+            };
+
+            let region_ptr = self.region_stack.last().copied().flatten()
+                .unwrap_or(ptr_ty.const_null());
+
+            let result = self.builder.build_call(
+                map_fn,
+                &[col_ptr.into(), func_ptr.into(), region_ptr.into()],
+                "pmap_result",
+            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+            Ok(result.try_as_basic_value().left())
+        } else {
+            // Fallback: just return the collection
+            Ok(Some(col_val))
+        }
+    }
+
+    // ============================================================
+    // Vibe Pipeline Runtime
+    // ============================================================
+
+    /// Declare pipeline runtime functions: source, map, filter, fold, collect, etc.
+    fn declare_pipeline_runtime(&mut self) {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        // Cons cell type for lists: { value: i64, next: ptr }
+        let cons_ty = self.context.struct_type(
+            &[i64_ty.into(), ptr_ty.into()],
+            false,
+        );
+        let cell_size = i64_ty.const_int(16, false);
+
+        // vibe_list_map(list: ptr, fn: ptr, region: ptr) -> ptr
+        // Maps a function over a linked list, returns new list in the given region
+        let map_ty = ptr_ty.fn_type(
+            &[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        let map_fn = self.llvm_module.add_function("vibe_list_map", map_ty, None);
+        self.functions.insert("vibe_list_map".into(), map_fn);
+
+        {
+            let entry = self.context.append_basic_block(map_fn, "entry");
+            let loop_bb = self.context.append_basic_block(map_fn, "loop");
+            let body_bb = self.context.append_basic_block(map_fn, "body");
+            let done_bb = self.context.append_basic_block(map_fn, "done");
+
+            self.builder.position_at_end(entry);
+            let list = map_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let func_ptr = map_fn.get_nth_param(1).unwrap().into_pointer_value();
+            let region = map_fn.get_nth_param(2).unwrap().into_pointer_value();
+
+            // result_head_alloca stores the head of the new list
+            let result_head = self.builder.build_alloca(ptr_ty, "result_head").unwrap();
+            self.builder.build_store(result_head, ptr_ty.const_null()).unwrap();
+            // tail_ptr_alloca points to the "next" field of the last node
+            let tail_ptr = self.builder.build_alloca(ptr_ty, "tail_ptr").unwrap();
+            self.builder.build_store(tail_ptr, result_head).unwrap();
+
+            let is_null = self.builder.build_is_null(list, "is_null").unwrap();
+            self.builder.build_conditional_branch(is_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(loop_bb);
+            let curr_phi = self.builder.build_phi(ptr_ty, "curr").unwrap();
+            curr_phi.add_incoming(&[(&list, entry)]);
+            let curr = curr_phi.as_basic_value().into_pointer_value();
+
+            // Load value from current cons cell
+            let val_ptr = self.builder.build_struct_gep(cons_ty, curr, 0, "val_ptr").unwrap();
+            let val = self.builder.build_load(i64_ty, val_ptr, "val").unwrap();
+
+            // Call fn(val)
+            let fn_ty = i64_ty.fn_type(&[i64_ty.into()], false);
+            let mapped = self.builder.build_indirect_call(fn_ty, func_ptr, &[val.into()], "mapped").unwrap();
+            let mapped_val = mapped.try_as_basic_value().left()
+                .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+
+            // Allocate new cons cell in region
+            let region_alloc_fn = self.functions["vibe_region_alloc"];
+            let new_cell = self.builder.build_call(region_alloc_fn, &[region.into(), cell_size.into()], "new_cell").unwrap()
+                .try_as_basic_value().left().unwrap().into_pointer_value();
+
+            // Store mapped value
+            let new_val_ptr = self.builder.build_struct_gep(cons_ty, new_cell, 0, "new_val").unwrap();
+            self.builder.build_store(new_val_ptr, mapped_val).unwrap();
+
+            // Set next = null
+            let new_next_ptr = self.builder.build_struct_gep(cons_ty, new_cell, 1, "new_next").unwrap();
+            self.builder.build_store(new_next_ptr, ptr_ty.const_null()).unwrap();
+
+            // Link: *tail_ptr = new_cell
+            let current_tail = self.builder.build_load(ptr_ty, tail_ptr, "cur_tail").unwrap().into_pointer_value();
+            self.builder.build_store(current_tail, new_cell).unwrap();
+
+            // Update tail_ptr to point to new_cell's next field
+            self.builder.build_store(tail_ptr, new_next_ptr).unwrap();
+
+            // Advance to next element
+            let next_ptr = self.builder.build_struct_gep(cons_ty, curr, 1, "next_ptr").unwrap();
+            let next = self.builder.build_load(ptr_ty, next_ptr, "next").unwrap().into_pointer_value();
+            let next_null = self.builder.build_is_null(next, "next_null").unwrap();
+            curr_phi.add_incoming(&[(&next, body_bb)]);
+
+            self.builder.build_unconditional_branch(body_bb).unwrap();
+
+            self.builder.position_at_end(body_bb);
+            self.builder.build_conditional_branch(next_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(done_bb);
+            let result = self.builder.build_load(ptr_ty, result_head, "result").unwrap();
+            self.builder.build_return(Some(&result)).unwrap();
+        }
+
+        // vibe_list_filter(list: ptr, predicate: ptr, region: ptr) -> ptr
+        let filter_ty = ptr_ty.fn_type(
+            &[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        let filter_fn = self.llvm_module.add_function("vibe_list_filter", filter_ty, None);
+        self.functions.insert("vibe_list_filter".into(), filter_fn);
+
+        {
+            let entry = self.context.append_basic_block(filter_fn, "entry");
+            let loop_bb = self.context.append_basic_block(filter_fn, "loop");
+            let check_bb = self.context.append_basic_block(filter_fn, "check");
+            let keep_bb = self.context.append_basic_block(filter_fn, "keep");
+            let skip_bb = self.context.append_basic_block(filter_fn, "skip");
+            let done_bb = self.context.append_basic_block(filter_fn, "done");
+
+            self.builder.position_at_end(entry);
+            let list = filter_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let pred_ptr = filter_fn.get_nth_param(1).unwrap().into_pointer_value();
+            let region = filter_fn.get_nth_param(2).unwrap().into_pointer_value();
+
+            let result_head = self.builder.build_alloca(ptr_ty, "result_head").unwrap();
+            self.builder.build_store(result_head, ptr_ty.const_null()).unwrap();
+            let tail_ptr = self.builder.build_alloca(ptr_ty, "tail_ptr").unwrap();
+            self.builder.build_store(tail_ptr, result_head).unwrap();
+
+            let is_null = self.builder.build_is_null(list, "is_null").unwrap();
+            self.builder.build_conditional_branch(is_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(loop_bb);
+            let curr_phi = self.builder.build_phi(ptr_ty, "curr").unwrap();
+            curr_phi.add_incoming(&[(&list, entry)]);
+            let curr = curr_phi.as_basic_value().into_pointer_value();
+
+            let val_ptr = self.builder.build_struct_gep(cons_ty, curr, 0, "val_ptr").unwrap();
+            let val = self.builder.build_load(i64_ty, val_ptr, "val").unwrap();
+
+            // Call predicate(val)
+            let pred_fn_ty = i64_ty.fn_type(&[i64_ty.into()], false);
+            let pred_result = self.builder.build_indirect_call(pred_fn_ty, pred_ptr, &[val.into()], "pred").unwrap();
+            let pred_val = pred_result.try_as_basic_value().left()
+                .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+
+            self.builder.build_unconditional_branch(check_bb).unwrap();
+
+            self.builder.position_at_end(check_bb);
+            let keep = self.builder.build_int_compare(
+                IntPredicate::NE, pred_val.into_int_value(), i64_ty.const_int(0, false), "keep",
+            ).unwrap();
+            self.builder.build_conditional_branch(keep, keep_bb, skip_bb).unwrap();
+
+            // Keep: add to result list
+            self.builder.position_at_end(keep_bb);
+            let region_alloc_fn = self.functions["vibe_region_alloc"];
+            let new_cell = self.builder.build_call(region_alloc_fn, &[region.into(), cell_size.into()], "new_cell").unwrap()
+                .try_as_basic_value().left().unwrap().into_pointer_value();
+
+            let new_val_ptr = self.builder.build_struct_gep(cons_ty, new_cell, 0, "nv").unwrap();
+            self.builder.build_store(new_val_ptr, val).unwrap();
+            let new_next_ptr = self.builder.build_struct_gep(cons_ty, new_cell, 1, "nn").unwrap();
+            self.builder.build_store(new_next_ptr, ptr_ty.const_null()).unwrap();
+
+            let current_tail = self.builder.build_load(ptr_ty, tail_ptr, "ct").unwrap().into_pointer_value();
+            self.builder.build_store(current_tail, new_cell).unwrap();
+            self.builder.build_store(tail_ptr, new_next_ptr).unwrap();
+            self.builder.build_unconditional_branch(skip_bb).unwrap();
+
+            // Skip / continue to next element
+            self.builder.position_at_end(skip_bb);
+            let next_ptr = self.builder.build_struct_gep(cons_ty, curr, 1, "next_ptr").unwrap();
+            let next = self.builder.build_load(ptr_ty, next_ptr, "next").unwrap().into_pointer_value();
+            let next_null = self.builder.build_is_null(next, "next_null").unwrap();
+            curr_phi.add_incoming(&[(&next, skip_bb)]);
+            self.builder.build_conditional_branch(next_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(done_bb);
+            let result = self.builder.build_load(ptr_ty, result_head, "result").unwrap();
+            self.builder.build_return(Some(&result)).unwrap();
+        }
+
+        // vibe_list_fold(list: ptr, init: i64, fn: ptr) -> i64
+        // Folds a list: fn(acc, elem) -> acc
+        let fold_ty = i64_ty.fn_type(
+            &[ptr_ty.into(), i64_ty.into(), ptr_ty.into()],
+            false,
+        );
+        let fold_fn = self.llvm_module.add_function("vibe_list_fold", fold_ty, None);
+        self.functions.insert("vibe_list_fold".into(), fold_fn);
+
+        {
+            let entry = self.context.append_basic_block(fold_fn, "entry");
+            let loop_bb = self.context.append_basic_block(fold_fn, "loop");
+            let next_bb = self.context.append_basic_block(fold_fn, "next");
+            let done_bb = self.context.append_basic_block(fold_fn, "done");
+
+            self.builder.position_at_end(entry);
+            let list = fold_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let init = fold_fn.get_nth_param(1).unwrap().into_int_value();
+            let fn_ptr = fold_fn.get_nth_param(2).unwrap().into_pointer_value();
+
+            let is_null = self.builder.build_is_null(list, "is_null").unwrap();
+            self.builder.build_conditional_branch(is_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(loop_bb);
+            let curr_phi = self.builder.build_phi(ptr_ty, "curr").unwrap();
+            curr_phi.add_incoming(&[(&list, entry)]);
+            let acc_phi = self.builder.build_phi(i64_ty, "acc").unwrap();
+            acc_phi.add_incoming(&[(&init, entry)]);
+
+            let curr = curr_phi.as_basic_value().into_pointer_value();
+            let acc = acc_phi.as_basic_value().into_int_value();
+
+            let val_ptr = self.builder.build_struct_gep(cons_ty, curr, 0, "val_ptr").unwrap();
+            let val = self.builder.build_load(i64_ty, val_ptr, "val").unwrap();
+
+            // Call fn(acc, val)
+            let fold_fn_ty = i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false);
+            let new_acc = self.builder.build_indirect_call(fold_fn_ty, fn_ptr, &[acc.into(), val.into()], "new_acc").unwrap();
+            let new_acc_val = new_acc.try_as_basic_value().left()
+                .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+
+            let next_ptr = self.builder.build_struct_gep(cons_ty, curr, 1, "next_ptr").unwrap();
+            let next = self.builder.build_load(ptr_ty, next_ptr, "next").unwrap().into_pointer_value();
+            let next_null = self.builder.build_is_null(next, "next_null").unwrap();
+
+            curr_phi.add_incoming(&[(&next, next_bb)]);
+            acc_phi.add_incoming(&[(&new_acc_val, next_bb)]);
+
+            self.builder.build_unconditional_branch(next_bb).unwrap();
+
+            self.builder.position_at_end(next_bb);
+            self.builder.build_conditional_branch(next_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(done_bb);
+            let result_phi = self.builder.build_phi(i64_ty, "result").unwrap();
+            result_phi.add_incoming(&[(&init, entry), (&new_acc_val, next_bb)]);
+            self.builder.build_return(Some(&result_phi.as_basic_value())).unwrap();
+        }
+
+        // vibe_list_length(list: ptr) -> i64
+        let len_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+        let len_fn = self.llvm_module.add_function("vibe_list_length", len_ty, None);
+        self.functions.insert("vibe_list_length".into(), len_fn);
+
+        {
+            let entry = self.context.append_basic_block(len_fn, "entry");
+            let loop_bb = self.context.append_basic_block(len_fn, "loop");
+            let next_bb = self.context.append_basic_block(len_fn, "next");
+            let done_bb = self.context.append_basic_block(len_fn, "done");
+
+            self.builder.position_at_end(entry);
+            let list = len_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let is_null = self.builder.build_is_null(list, "is_null").unwrap();
+            self.builder.build_conditional_branch(is_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(loop_bb);
+            let curr_phi = self.builder.build_phi(ptr_ty, "curr").unwrap();
+            curr_phi.add_incoming(&[(&list, entry)]);
+            let count_phi = self.builder.build_phi(i64_ty, "count").unwrap();
+            count_phi.add_incoming(&[(&i64_ty.const_int(0, false), entry)]);
+
+            let curr = curr_phi.as_basic_value().into_pointer_value();
+            let count = count_phi.as_basic_value().into_int_value();
+            let new_count = self.builder.build_int_add(count, i64_ty.const_int(1, false), "inc").unwrap();
+
+            let next_ptr = self.builder.build_struct_gep(cons_ty, curr, 1, "next_ptr").unwrap();
+            let next = self.builder.build_load(ptr_ty, next_ptr, "next").unwrap().into_pointer_value();
+            let next_null = self.builder.build_is_null(next, "next_null").unwrap();
+
+            curr_phi.add_incoming(&[(&next, next_bb)]);
+            count_phi.add_incoming(&[(&new_count, next_bb)]);
+
+            self.builder.build_unconditional_branch(next_bb).unwrap();
+
+            self.builder.position_at_end(next_bb);
+            self.builder.build_conditional_branch(next_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(done_bb);
+            let result_phi = self.builder.build_phi(i64_ty, "result").unwrap();
+            result_phi.add_incoming(&[(&i64_ty.const_int(0, false), entry), (&new_count, next_bb)]);
+            self.builder.build_return(Some(&result_phi.as_basic_value())).unwrap();
+        }
+
+        // vibe_list_for_each(list: ptr, fn: ptr) -> void
+        let foreach_ty = self.context.void_type().fn_type(
+            &[ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        let foreach_fn = self.llvm_module.add_function("vibe_list_for_each", foreach_ty, None);
+        self.functions.insert("vibe_list_for_each".into(), foreach_fn);
+
+        {
+            let entry = self.context.append_basic_block(foreach_fn, "entry");
+            let loop_bb = self.context.append_basic_block(foreach_fn, "loop");
+            let next_bb = self.context.append_basic_block(foreach_fn, "next");
+            let done_bb = self.context.append_basic_block(foreach_fn, "done");
+
+            self.builder.position_at_end(entry);
+            let list = foreach_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let fn_ptr = foreach_fn.get_nth_param(1).unwrap().into_pointer_value();
+            let is_null = self.builder.build_is_null(list, "is_null").unwrap();
+            self.builder.build_conditional_branch(is_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(loop_bb);
+            let curr_phi = self.builder.build_phi(ptr_ty, "curr").unwrap();
+            curr_phi.add_incoming(&[(&list, entry)]);
+            let curr = curr_phi.as_basic_value().into_pointer_value();
+
+            let val_ptr = self.builder.build_struct_gep(cons_ty, curr, 0, "val_ptr").unwrap();
+            let val = self.builder.build_load(i64_ty, val_ptr, "val").unwrap();
+
+            let fn_ty = self.context.void_type().fn_type(&[i64_ty.into()], false);
+            self.builder.build_indirect_call(fn_ty, fn_ptr, &[val.into()], "").unwrap();
+
+            let next_ptr = self.builder.build_struct_gep(cons_ty, curr, 1, "next_ptr").unwrap();
+            let next = self.builder.build_load(ptr_ty, next_ptr, "next").unwrap().into_pointer_value();
+            let next_null = self.builder.build_is_null(next, "next_null").unwrap();
+
+            curr_phi.add_incoming(&[(&next, next_bb)]);
+            self.builder.build_unconditional_branch(next_bb).unwrap();
+
+            self.builder.position_at_end(next_bb);
+            self.builder.build_conditional_branch(next_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(done_bb);
+            self.builder.build_return(None).unwrap();
+        }
+    }
+
+    /// Try to compile a built-in pipeline function call (source, map, filter, fold, collect, etc.)
+    fn try_compile_pipeline_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        match name {
+            "source" => {
+                // source(data) just returns the data as-is
+                if let Some(arg) = args.first() {
+                    let val = self.compile_expr(arg, function)?.unwrap();
+                    Ok(Some(val))
+                } else {
+                    Ok(None)
+                }
+            }
+            "collect" | "collect_vec" => {
+                // collect is identity on lists
+                if let Some(arg) = args.first() {
+                    let val = self.compile_expr(arg, function)?.unwrap();
+                    Ok(Some(val))
+                } else {
+                    Ok(None)
+                }
+            }
+            "count" => {
+                if let Some(arg) = args.first() {
+                    let list = self.compile_expr(arg, function)?.unwrap();
+                    if list.is_pointer_value() {
+                        let len_fn = self.functions["vibe_list_length"];
+                        let result = self.builder.build_call(
+                            len_fn, &[list.into()], "count",
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        Ok(result.try_as_basic_value().left())
+                    } else {
+                        Ok(Some(list))
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+            "length" => {
+                if let Some(arg) = args.first() {
+                    let list = self.compile_expr(arg, function)?.unwrap();
+                    if list.is_pointer_value() {
+                        let len_fn = self.functions["vibe_list_length"];
+                        let result = self.builder.build_call(
+                            len_fn, &[list.into()], "length",
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        Ok(result.try_as_basic_value().left())
+                    } else {
+                        Ok(Some(list))
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None), // Not a pipeline function
+        }
+    }
+
+    /// Compile a vibe pipeline expression
+    fn compile_vibe_pipeline(
+        &mut self,
+        source: &Expr,
+        stages: &[PipelineStage],
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        // Compile the source expression
+        let mut current = self.compile_expr(source, function)?.unwrap();
+
+        let region_ptr = self.region_stack.last().copied().flatten()
+            .unwrap_or(ptr_ty.const_null());
+
+        // Apply each stage sequentially
+        for stage in stages {
+            match stage {
+                PipelineStage::Map(func_expr) => {
+                    let func_val = self.compile_expr(func_expr, function)?.unwrap();
+                    if current.is_pointer_value() && func_val.is_pointer_value() {
+                        let map_fn = self.functions["vibe_list_map"];
+                        let result = self.builder.build_call(
+                            map_fn,
+                            &[current.into(), func_val.into(), region_ptr.into()],
+                            "mapped",
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        current = result.try_as_basic_value().left()
+                            .unwrap_or_else(|| ptr_ty.const_null().into());
+                    }
+                }
+                PipelineStage::Filter(pred_expr) => {
+                    let pred_val = self.compile_expr(pred_expr, function)?.unwrap();
+                    if current.is_pointer_value() && pred_val.is_pointer_value() {
+                        let filter_fn = self.functions["vibe_list_filter"];
+                        let result = self.builder.build_call(
+                            filter_fn,
+                            &[current.into(), pred_val.into(), region_ptr.into()],
+                            "filtered",
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        current = result.try_as_basic_value().left()
+                            .unwrap_or_else(|| ptr_ty.const_null().into());
+                    }
+                }
+                PipelineStage::Fold(init_expr, func_expr) => {
+                    let init_val = self.compile_expr(init_expr, function)?.unwrap();
+                    let func_val = self.compile_expr(func_expr, function)?.unwrap();
+                    if current.is_pointer_value() {
+                        let fold_fn = self.functions["vibe_list_fold"];
+                        let init_i64 = self.ensure_i64(init_val);
+                        let result = self.builder.build_call(
+                            fold_fn,
+                            &[current.into(), init_i64.into(), func_val.into()],
+                            "folded",
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        current = result.try_as_basic_value().left()
+                            .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+                    }
+                }
+                PipelineStage::ForEach(func_expr) => {
+                    let func_val = self.compile_expr(func_expr, function)?.unwrap();
+                    if current.is_pointer_value() && func_val.is_pointer_value() {
+                        let foreach_fn = self.functions["vibe_list_for_each"];
+                        self.builder.build_call(
+                            foreach_fn,
+                            &[current.into(), func_val.into()],
+                            "",
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        current = i64_ty.const_int(0, false).into();
+                    }
+                }
+                PipelineStage::Collect | PipelineStage::Distinct => {
+                    // Identity — list is already collected
+                }
+                PipelineStage::Count => {
+                    if current.is_pointer_value() {
+                        let len_fn = self.functions["vibe_list_length"];
+                        let result = self.builder.build_call(
+                            len_fn, &[current.into()], "count",
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        current = result.try_as_basic_value().left()
+                            .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+                    }
+                }
+                PipelineStage::First => {
+                    if current.is_pointer_value() {
+                        let cons_ty = self.context.struct_type(
+                            &[i64_ty.into(), ptr_ty.into()],
+                            false,
+                        );
+                        let is_null = self.builder.build_is_null(current.into_pointer_value(), "is_null").unwrap();
+                        let then_bb = self.context.append_basic_block(function, "first.some");
+                        let else_bb = self.context.append_basic_block(function, "first.none");
+                        let merge_bb = self.context.append_basic_block(function, "first.merge");
+
+                        self.builder.build_conditional_branch(is_null, else_bb, then_bb).unwrap();
+
+                        self.builder.position_at_end(then_bb);
+                        let val_ptr = self.builder.build_struct_gep(cons_ty, current.into_pointer_value(), 0, "first_val").unwrap();
+                        let val = self.builder.build_load(i64_ty, val_ptr, "first").unwrap();
+                        self.builder.build_unconditional_branch(merge_bb).unwrap();
+
+                        self.builder.position_at_end(else_bb);
+                        self.builder.build_unconditional_branch(merge_bb).unwrap();
+
+                        self.builder.position_at_end(merge_bb);
+                        let phi = self.builder.build_phi(i64_ty, "first_result").unwrap();
+                        phi.add_incoming(&[(&val, then_bb), (&i64_ty.const_int(0, false), else_bb)]);
+                        current = phi.as_basic_value();
+                    }
+                }
+                _ => {
+                    // Other stages: pass through for now
+                }
+            }
+        }
+
+        Ok(Some(current))
     }
 
     fn compile_print(

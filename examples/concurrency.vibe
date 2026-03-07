@@ -1,0 +1,23 @@
+module main
+
+fn compute_a() -> Int = do
+    let x = 100 * 100
+    x + 42
+
+fn compute_b() -> Int = do
+    let y = 200 * 200
+    y + 7
+
+fn compute_c() -> Int = do
+    let z = 300 * 300
+    z + 1
+
+-- Use par to evaluate three computations in parallel
+fn main() -> Int = do
+    let results = par(
+        fn() = compute_a(),
+        fn() = compute_b(),
+        fn() = compute_c(),
+    )
+    print("Parallel computation complete!")
+    0

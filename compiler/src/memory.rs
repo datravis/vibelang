@@ -235,12 +235,73 @@ impl EscapeAnalyzer {
                 self.bind_pattern(pattern);
             }
 
-            Expr::Handle(expr, _, _) => {
+            Expr::Handle(expr, handlers, _) => {
                 self.analyze_expr(expr, is_tail);
+                for handler in handlers {
+                    self.scope_depth += 1;
+                    for param in &handler.params {
+                        self.define(param);
+                    }
+                    self.analyze_expr(&handler.body, false);
+                    self.scope_depth -= 1;
+                }
             }
 
             Expr::Resume(expr, _) => {
                 self.analyze_expr(expr, is_tail);
+            }
+
+            Expr::Perform(_, _, args, _) => {
+                for a in args {
+                    self.analyze_expr(a, false);
+                }
+            }
+
+            Expr::Par(exprs, _) => {
+                for e in exprs {
+                    self.analyze_expr(e, false);
+                }
+            }
+
+            Expr::Pmap(collection, func, _) => {
+                self.analyze_expr(collection, false);
+                self.analyze_expr(func, false);
+            }
+
+            Expr::VibePipeline(source, stages, _) => {
+                self.analyze_expr(source, false);
+                for stage in stages {
+                    match stage {
+                        crate::ast::PipelineStage::Map(f) |
+                        crate::ast::PipelineStage::Filter(f) |
+                        crate::ast::PipelineStage::FlatMap(f) |
+                        crate::ast::PipelineStage::FilterMap(f) |
+                        crate::ast::PipelineStage::TakeWhile(f) |
+                        crate::ast::PipelineStage::DropWhile(f) |
+                        crate::ast::PipelineStage::ForEach(f) |
+                        crate::ast::PipelineStage::SortBy(f) |
+                        crate::ast::PipelineStage::GroupBy(f) |
+                        crate::ast::PipelineStage::Chunk(f) |
+                        crate::ast::PipelineStage::Take(f) |
+                        crate::ast::PipelineStage::Drop(f) |
+                        crate::ast::PipelineStage::Any(f) |
+                        crate::ast::PipelineStage::All(f) |
+                        crate::ast::PipelineStage::Reduce(f) |
+                        crate::ast::PipelineStage::Inspect(f) => {
+                            self.analyze_expr(f, false);
+                        }
+                        crate::ast::PipelineStage::Fold(init, f) |
+                        crate::ast::PipelineStage::Scan(init, f) => {
+                            self.analyze_expr(init, false);
+                            self.analyze_expr(f, false);
+                        }
+                        crate::ast::PipelineStage::Collect |
+                        crate::ast::PipelineStage::Count |
+                        crate::ast::PipelineStage::First |
+                        crate::ast::PipelineStage::Last |
+                        crate::ast::PipelineStage::Distinct => {}
+                    }
+                }
             }
         }
     }

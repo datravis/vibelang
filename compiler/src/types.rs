@@ -89,6 +89,10 @@ impl std::fmt::Display for Type {
 struct TypeChecker {
     env: Vec<HashMap<String, Type>>,
     type_defs: HashMap<String, TypeDef>,
+    /// Effect definitions: effect_name -> list of (operation_name, param_types, return_type)
+    effect_defs: HashMap<String, Vec<(String, Vec<Type>, Type)>>,
+    /// All effect operation names -> (effect_name, param_types, return_type)
+    effect_ops: HashMap<String, (String, Vec<Type>, Type)>,
     next_var: usize,
 }
 
@@ -118,6 +122,8 @@ impl TypeChecker {
         Self {
             env: vec![env],
             type_defs: HashMap::new(),
+            effect_defs: HashMap::new(),
+            effect_ops: HashMap::new(),
             next_var: 0,
         }
     }
@@ -367,9 +373,45 @@ impl TypeChecker {
                 Ok(Type::Unit)
             }
 
-            Expr::Handle(expr, _handlers, _) => self.check_expr(expr),
+            Expr::Handle(expr, handlers, _) => {
+                let result = self.check_expr(expr)?;
+                for handler in handlers {
+                    self.push_scope();
+                    for param in &handler.params {
+                        self.define(param.clone(), Type::Unknown);
+                    }
+                    self.check_expr(&handler.body)?;
+                    self.pop_scope();
+                }
+                Ok(result)
+            }
 
             Expr::Resume(expr, _) => self.check_expr(expr),
+
+            Expr::Perform(_effect, _op, args, _) => {
+                for arg in args {
+                    self.check_expr(arg)?;
+                }
+                Ok(Type::Unknown)
+            }
+
+            Expr::Par(exprs, _) => {
+                let mut types = Vec::new();
+                for expr in exprs {
+                    types.push(self.check_expr(expr)?);
+                }
+                Ok(Type::Tuple(types))
+            }
+
+            Expr::Pmap(collection, func, _) => {
+                let col_type = self.check_expr(collection)?;
+                self.check_expr(func)?;
+                Ok(col_type)
+            }
+
+            Expr::VibePipeline(source, _stages, _) => {
+                self.check_expr(source)
+            }
         }
     }
 
@@ -459,6 +501,41 @@ pub fn check(module: &Module) -> Result<(), TypeError> {
         }
     }
 
+    // Register effect definitions and bring operations into scope
+    for decl in &module.declarations {
+        if let Decl::EffectDef(ed) = decl {
+            let mut ops = Vec::new();
+            for op in &ed.operations {
+                let param_types: Vec<Type> = op
+                    .params
+                    .iter()
+                    .map(|p| {
+                        p.type_ann
+                            .as_ref()
+                            .map(|ta| checker.resolve_type_expr(ta))
+                            .unwrap_or(Type::Unknown)
+                    })
+                    .collect();
+                let ret = op
+                    .return_type
+                    .as_ref()
+                    .map(|r| checker.resolve_type_expr(r))
+                    .unwrap_or(Type::Unknown);
+                ops.push((op.name.clone(), param_types.clone(), ret.clone()));
+                checker.effect_ops.insert(
+                    op.name.clone(),
+                    (ed.name.clone(), param_types.clone(), ret.clone()),
+                );
+                // Register effect operations as callable functions
+                checker.define(
+                    op.name.clone(),
+                    Type::Fn(param_types, Box::new(ret)),
+                );
+            }
+            checker.effect_defs.insert(ed.name.clone(), ops);
+        }
+    }
+
     // Second pass: register all function signatures
     for decl in &module.declarations {
         if let Decl::Function(f) = decl {
@@ -481,10 +558,46 @@ pub fn check(module: &Module) -> Result<(), TypeError> {
         }
     }
 
+    // Register vibe declarations as functions
+    for decl in &module.declarations {
+        if let Decl::VibeDecl(v) = decl {
+            let param_types: Vec<Type> = v
+                .params
+                .iter()
+                .map(|p| {
+                    p.type_ann
+                        .as_ref()
+                        .map(|ta| checker.resolve_type_expr(ta))
+                        .unwrap_or(Type::Unknown)
+                })
+                .collect();
+            let ret = v
+                .return_type
+                .as_ref()
+                .map(|r| checker.resolve_type_expr(r))
+                .unwrap_or(Type::Unknown);
+            checker.define(v.name.clone(), Type::Fn(param_types, Box::new(ret)));
+        }
+    }
+
     // Third pass: check function bodies
     for decl in &module.declarations {
-        if let Decl::Function(f) = decl {
-            checker.check_fn_decl(f)?;
+        match decl {
+            Decl::Function(f) => checker.check_fn_decl(f)?,
+            Decl::VibeDecl(v) => {
+                // Type check vibe body like a function
+                let fn_decl = FnDecl {
+                    public: false,
+                    name: v.name.clone(),
+                    params: v.params.clone(),
+                    return_type: v.return_type.clone(),
+                    effects: Vec::new(),
+                    body: v.body.clone(),
+                    span: v.span,
+                };
+                checker.check_fn_decl(&fn_decl)?;
+            }
+            _ => {}
         }
     }
 

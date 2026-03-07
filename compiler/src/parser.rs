@@ -214,6 +214,7 @@ impl Parser {
             TokenKind::Trait => Ok(Decl::TraitDef(self.parse_trait_def()?)),
             TokenKind::Impl => Ok(Decl::ImplBlock(self.parse_impl_block()?)),
             TokenKind::Effect => Ok(Decl::EffectDef(self.parse_effect_def()?)),
+            TokenKind::Vibe => Ok(Decl::VibeDecl(self.parse_vibe_decl()?)),
             _ => {
                 let span = self.span();
                 Err(ParseError::Unexpected(
@@ -553,7 +554,7 @@ impl Parser {
         self.expect(&TokenKind::LBrace)?;
         let mut operations = Vec::new();
         while *self.peek() != TokenKind::RBrace {
-            operations.push(self.parse_fn_decl(false)?);
+            operations.push(self.parse_effect_op()?);
         }
         self.expect(&TokenKind::RBrace)?;
 
@@ -561,6 +562,73 @@ impl Parser {
             name,
             type_params,
             operations,
+            span,
+        })
+    }
+
+    /// Parse an effect operation signature: fn name(params) -> ReturnType
+    /// Unlike regular fn decls, effect ops have no body (no `= expr`)
+    fn parse_effect_op(&mut self) -> Result<FnDecl, ParseError> {
+        let span = self.expect(&TokenKind::Fn)?;
+        let (name, _) = self.expect_ident()?;
+        let params = self.parse_params()?;
+
+        let return_type = if *self.peek() == TokenKind::Arrow {
+            self.advance();
+            Some(self.parse_type_expr()?)
+        } else {
+            None
+        };
+
+        let effects = if *self.peek() == TokenKind::With {
+            self.advance();
+            let mut effs = vec![self.parse_type_expr()?];
+            while *self.peek() == TokenKind::Comma {
+                self.advance();
+                effs.push(self.parse_type_expr()?);
+            }
+            effs
+        } else {
+            Vec::new()
+        };
+
+        // Effect operations have no body — use unit placeholder
+        Ok(FnDecl {
+            public: false,
+            name,
+            params,
+            return_type,
+            effects,
+            body: Expr::UnitLit(span),
+            span,
+        })
+    }
+
+    fn parse_vibe_decl(&mut self) -> Result<VibeDecl, ParseError> {
+        let span = self.expect(&TokenKind::Vibe)?;
+        let (name, _) = self.expect_ident()?;
+
+        let params = if *self.peek() == TokenKind::LParen {
+            self.parse_params()?
+        } else {
+            Vec::new()
+        };
+
+        let return_type = if *self.peek() == TokenKind::Arrow {
+            self.advance();
+            Some(self.parse_type_expr()?)
+        } else {
+            None
+        };
+
+        self.expect(&TokenKind::Eq)?;
+        let body = self.parse_expr()?;
+
+        Ok(VibeDecl {
+            name,
+            params,
+            return_type,
+            body,
             span,
         })
     }
@@ -850,6 +918,52 @@ impl Parser {
             // Lambda: fn(x, y) = body
             TokenKind::Fn => self.parse_lambda(),
 
+            // Handle expression: handle <expr> with <EffectName> { handlers }
+            TokenKind::Handle => self.parse_handle_expr(),
+
+            // Resume expression: resume(<expr>)
+            TokenKind::Resume => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let expr = if *self.peek() == TokenKind::RParen {
+                    Expr::UnitLit(span)
+                } else {
+                    self.parse_expr()?
+                };
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::Resume(Box::new(expr), span))
+            }
+
+            // Par expression: par(expr1, expr2, ...)
+            TokenKind::Par => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let mut exprs = vec![self.parse_expr()?];
+                while *self.peek() == TokenKind::Comma {
+                    self.advance();
+                    if *self.peek() == TokenKind::RParen {
+                        break;
+                    }
+                    exprs.push(self.parse_expr()?);
+                }
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::Par(exprs, span))
+            }
+
+            // Pmap expression: pmap(collection, function)
+            TokenKind::Pmap => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let collection = self.parse_expr()?;
+                self.expect(&TokenKind::Comma)?;
+                let func = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::Pmap(Box::new(collection), Box::new(func), span))
+            }
+
             // Backslash lambda: \x -> body
             TokenKind::Backslash => {
                 let span = self.span();
@@ -1044,7 +1158,8 @@ impl Parser {
     fn is_at_decl_start(&self) -> bool {
         match self.peek() {
             TokenKind::Fn | TokenKind::Type | TokenKind::Trait
-            | TokenKind::Impl | TokenKind::Effect | TokenKind::Pub => true,
+            | TokenKind::Impl | TokenKind::Effect | TokenKind::Pub
+            | TokenKind::Vibe => true,
             _ => false,
         }
     }
@@ -1086,6 +1201,63 @@ impl Parser {
         self.expect(&TokenKind::Eq)?;
         let body = self.parse_expr()?;
         Ok(Expr::Lambda(params, Box::new(body), span))
+    }
+
+    /// Parse: handle <expr> with <EffectName>[<TypeArgs>] { op(params) -> body, ... }
+    fn parse_handle_expr(&mut self) -> Result<Expr, ParseError> {
+        let span = self.span();
+        self.expect(&TokenKind::Handle)?;
+        let body = self.parse_expr()?;
+
+        let mut handlers = Vec::new();
+
+        // Parse one or more `with Effect { handlers }` clauses
+        while *self.peek() == TokenKind::With {
+            self.advance();
+            let (effect_name, _) = self.expect_type_ident()?;
+
+            // Optional type arguments [A, B, ...]
+            if *self.peek() == TokenKind::LBracket {
+                self.advance();
+                while *self.peek() != TokenKind::RBracket {
+                    self.parse_type_expr()?; // consume but we don't use type args in handlers yet
+                    if *self.peek() == TokenKind::Comma {
+                        self.advance();
+                    }
+                }
+                self.expect(&TokenKind::RBracket)?;
+            }
+
+            self.expect(&TokenKind::LBrace)?;
+
+            while *self.peek() != TokenKind::RBrace {
+                let (op_name, _) = self.expect_ident()?;
+                self.expect(&TokenKind::LParen)?;
+                let mut params = Vec::new();
+                if *self.peek() != TokenKind::RParen {
+                    let (pname, _) = self.expect_ident()?;
+                    params.push(pname);
+                    while *self.peek() == TokenKind::Comma {
+                        self.advance();
+                        let (pname, _) = self.expect_ident()?;
+                        params.push(pname);
+                    }
+                }
+                self.expect(&TokenKind::RParen)?;
+                self.expect(&TokenKind::Arrow)?;
+                let handler_body = self.parse_expr()?;
+
+                handlers.push(Handler {
+                    effect_name: effect_name.clone(),
+                    operation: op_name,
+                    params,
+                    body: handler_body,
+                });
+            }
+            self.expect(&TokenKind::RBrace)?;
+        }
+
+        Ok(Expr::Handle(Box::new(body), handlers, span))
     }
 }
 

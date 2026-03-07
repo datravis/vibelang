@@ -28,6 +28,16 @@ pub enum Decl {
     TraitDef(TraitDef),
     ImplBlock(ImplBlock),
     EffectDef(EffectDef),
+    VibeDecl(VibeDecl),
+}
+
+#[derive(Debug, Clone)]
+pub struct VibeDecl {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub return_type: Option<TypeExpr>,
+    pub body: Expr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +157,39 @@ pub enum Expr {
     // Effects
     Handle(Box<Expr>, Vec<Handler>, Span),
     Resume(Box<Expr>, Span),
+    Perform(String, String, Vec<Expr>, Span), // effect_name, operation, args
+
+    // Concurrency
+    Par(Vec<Expr>, Span),                        // par(expr1, expr2, ...)
+    Pmap(Box<Expr>, Box<Expr>, Span),            // pmap(collection, function)
+    VibePipeline(Box<Expr>, Vec<PipelineStage>, Span), // vibe: source |> stages |> terminal
+}
+
+#[derive(Debug, Clone)]
+pub enum PipelineStage {
+    Map(Expr),
+    Filter(Expr),
+    FlatMap(Expr),
+    FilterMap(Expr),
+    Take(Expr),
+    Drop(Expr),
+    TakeWhile(Expr),
+    DropWhile(Expr),
+    Fold(Expr, Expr),     // initial, function
+    ForEach(Expr),
+    Collect,
+    Count,
+    First,
+    Last,
+    Scan(Expr, Expr),     // initial, function
+    SortBy(Expr),
+    Distinct,
+    GroupBy(Expr),
+    Chunk(Expr),
+    Any(Expr),
+    All(Expr),
+    Reduce(Expr),
+    Inspect(Expr),
 }
 
 #[derive(Debug, Clone)]
