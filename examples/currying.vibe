@@ -1,0 +1,34 @@
+module main
+
+fn add(a: Int, b: Int) -> Int = a + b
+
+fn multiply(a: Int, b: Int) -> Int = a * b
+
+-- Higher-order: apply a function to a value
+fn apply(f: fn(Int) -> Int, x: Int) -> Int = f(x)
+
+fn main() -> Int = do
+    -- Test 1: Partial application
+    let add_five = add(5)
+    let result1 = add_five(3)
+    print(result1)
+
+    -- Test 2: Partial application with multiply
+    let triple = multiply(3)
+    let result2 = triple(7)
+    print(result2)
+
+    -- Test 3: Partial application passed to higher-order function
+    let result3 = apply(add(10), 25)
+    print(result3)
+
+    -- Test 4: Function as value passed to higher-order
+    let result4 = apply(fn(x: Int) -> Int = x * x, 6)
+    print(result4)
+
+    -- Test 5: Named function used as value, then called via closure
+    let double = multiply(2)
+    let result5 = 8 |> double
+    print(result5)
+
+    0

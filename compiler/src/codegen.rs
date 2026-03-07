@@ -120,6 +120,8 @@ struct Codegen<'ctx> {
     // --- Closures ---
     /// Counter for generating unique lambda function names
     lambda_counter: usize,
+    /// Function arities: function_name -> param_count (for partial application)
+    function_arities: HashMap<String, usize>,
 
     // --- Effect system ---
     /// Effect definitions: effect_name -> [(op_name, param_count)]
@@ -161,6 +163,7 @@ impl<'ctx> Codegen<'ctx> {
             region_stack: Vec::new(),
             current_escape_info: None,
             lambda_counter: 0,
+            function_arities: HashMap::new(),
             effect_defs: HashMap::new(),
             effect_ops: HashMap::new(),
             handler_stack_global: None,
@@ -698,6 +701,7 @@ impl<'ctx> Codegen<'ctx> {
 
         let function = self.llvm_module.add_function(&decl.name, fn_type, None);
         self.functions.insert(decl.name.clone(), function);
+        self.function_arities.insert(decl.name.clone(), decl.params.len());
         Ok(())
     }
 
@@ -870,8 +874,13 @@ impl<'ctx> Codegen<'ctx> {
             Expr::Ident(name, _) => {
                 if let Some(val) = self.get_var(name) {
                     Ok(Some(val))
-                } else if let Some(func) = self.functions.get(name) {
-                    Ok(Some(func.as_global_value().as_pointer_value().into()))
+                } else if let Some(func) = self.functions.get(name).copied() {
+                    // Wrap known function as a closure {fn_ptr, env_ptr=null}
+                    // so it can be passed to higher-order functions uniformly.
+                    // We create a thin wrapper that accepts (env, args...) and
+                    // forwards to the original function ignoring env.
+                    let arity = self.function_arities.get(name).copied().unwrap_or(0);
+                    self.wrap_function_as_closure(func, arity)
                 } else {
                     Err(CodegenError::UndefinedVar(name.clone()))
                 }
@@ -1039,6 +1048,19 @@ impl<'ctx> Codegen<'ctx> {
                     }
 
                     if let Some(func) = self.functions.get(name).copied() {
+                        let expected_arity = self.function_arities.get(name).copied().unwrap_or(args.len());
+
+                        if args.len() < expected_arity {
+                            // Partial application: compile provided args, create a closure
+                            // that captures them and takes the remaining args.
+                            let mut compiled_args = Vec::new();
+                            for a in args {
+                                let val = self.compile_expr(a, function)?.unwrap();
+                                compiled_args.push(val);
+                            }
+                            return self.compile_partial_application(func, &compiled_args, expected_arity, function);
+                        }
+
                         let compiled_args: Result<Vec<BasicMetadataValueEnum>, _> = args
                             .iter()
                             .map(|a| {
@@ -1842,6 +1864,199 @@ impl<'ctx> Codegen<'ctx> {
             .build_indirect_call(fn_type, fn_ptr, &call_args, "closure_call")
             .map_err(|e| CodegenError::Llvm(e.to_string()))?;
         Ok(result.try_as_basic_value().left())
+    }
+
+    /// Wrap a known function as a closure value {fn_ptr, env_ptr=null}.
+    /// Creates a thin wrapper function with signature fn(env, args...) -> i64
+    /// that ignores env and calls the original function.
+    fn wrap_function_as_closure(
+        &mut self,
+        func: FunctionValue<'ctx>,
+        arity: usize,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        // Create a wrapper: fn(env: ptr, p0: i64, ..., pN: i64) -> i64
+        let wrapper_id = self.lambda_counter;
+        self.lambda_counter += 1;
+        let wrapper_name = format!("__wrap_{}", wrapper_id);
+
+        let mut wrapper_param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
+        wrapper_param_types.push(BasicMetadataTypeEnum::PointerType(ptr_ty)); // env (ignored)
+        for _ in 0..arity {
+            wrapper_param_types.push(BasicMetadataTypeEnum::IntType(i64_ty));
+        }
+        let wrapper_fn_type = i64_ty.fn_type(&wrapper_param_types, false);
+        let wrapper_fn = self.llvm_module.add_function(&wrapper_name, wrapper_fn_type, None);
+
+        let prev_bb = self.builder.get_insert_block();
+        let entry = self.context.append_basic_block(wrapper_fn, "entry");
+        self.builder.position_at_end(entry);
+
+        // Forward all args (skip env at index 0) to the original function
+        let mut fwd_args: Vec<BasicMetadataValueEnum> = Vec::new();
+        for i in 0..arity {
+            fwd_args.push(wrapper_fn.get_nth_param((i + 1) as u32).unwrap().into());
+        }
+        let result = self.builder
+            .build_call(func, &fwd_args, "fwd")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        let ret_val = result.try_as_basic_value().left()
+            .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+        let ret_val = self.ensure_i64(ret_val);
+        self.builder.build_return(Some(&ret_val))
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        if let Some(bb) = prev_bb {
+            self.builder.position_at_end(bb);
+        }
+
+        // Allocate closure struct {wrapper_fn_ptr, null}
+        let closure_struct_ty = self.context.struct_type(
+            &[ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        let closure_size = i64_ty.const_int(16, false);
+        let closure_ptr = self.builder
+            .build_call(self.functions["malloc"], &[closure_size.into()], "fn_closure")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_pointer_value();
+
+        let fn_slot = self.builder
+            .build_struct_gep(closure_struct_ty, closure_ptr, 0, "fn_slot")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        self.builder.build_store(fn_slot, wrapper_fn.as_global_value().as_pointer_value())
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        let env_slot = self.builder
+            .build_struct_gep(closure_struct_ty, closure_ptr, 1, "env_slot")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        self.builder.build_store(env_slot, ptr_ty.const_null())
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// Compile partial application: given a function and some args (fewer than arity),
+    /// create a closure that captures the provided args and takes the remaining ones.
+    fn compile_partial_application(
+        &mut self,
+        func: FunctionValue<'ctx>,
+        provided_args: &[BasicValueEnum<'ctx>],
+        total_arity: usize,
+        _function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let remaining = total_arity - provided_args.len();
+
+        // Create a partial application function:
+        //   fn(env: ptr, rem_arg0: i64, ..., rem_argN: i64) -> i64
+        // The env contains the captured (provided) args.
+        let pa_id = self.lambda_counter;
+        self.lambda_counter += 1;
+        let pa_name = format!("__partial_{}", pa_id);
+
+        let mut pa_param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
+        pa_param_types.push(BasicMetadataTypeEnum::PointerType(ptr_ty)); // env
+        for _ in 0..remaining {
+            pa_param_types.push(BasicMetadataTypeEnum::IntType(i64_ty));
+        }
+        let pa_fn_type = i64_ty.fn_type(&pa_param_types, false);
+        let pa_fn = self.llvm_module.add_function(&pa_name, pa_fn_type, None);
+
+        let prev_bb = self.builder.get_insert_block();
+        let entry = self.context.append_basic_block(pa_fn, "entry");
+        self.builder.position_at_end(entry);
+
+        // Load captured args from env
+        let env_ptr = pa_fn.get_nth_param(0).unwrap().into_pointer_value();
+        let env_struct_ty = self.context.struct_type(
+            &vec![i64_ty.into(); provided_args.len()],
+            false,
+        );
+
+        let mut all_args: Vec<BasicMetadataValueEnum> = Vec::new();
+        for i in 0..provided_args.len() {
+            let field_ptr = self.builder
+                .build_struct_gep(env_struct_ty, env_ptr, i as u32, &format!("cap_{}", i))
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            let loaded = self.builder
+                .build_load(i64_ty, field_ptr, &format!("arg_{}", i))
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            all_args.push(loaded.into());
+        }
+
+        // Add remaining args from parameters
+        for i in 0..remaining {
+            let param = pa_fn.get_nth_param((i + 1) as u32).unwrap();
+            all_args.push(param.into());
+        }
+
+        // Call the original function with all args
+        let result = self.builder
+            .build_call(func, &all_args, "pa_call")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        let ret_val = result.try_as_basic_value().left()
+            .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+        let ret_val = self.ensure_i64(ret_val);
+        self.builder.build_return(Some(&ret_val))
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        if let Some(bb) = prev_bb {
+            self.builder.position_at_end(bb);
+        }
+
+        // Allocate env with captured args
+        let env_size = i64_ty.const_int((provided_args.len() * 8) as u64, false);
+        let env_alloc = self.builder
+            .build_call(self.functions["malloc"], &[env_size.into()], "pa_env")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_pointer_value();
+
+        for (i, val) in provided_args.iter().enumerate() {
+            let field_ptr = self.builder
+                .build_struct_gep(env_struct_ty, env_alloc, i as u32, &format!("store_cap_{}", i))
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            let store_val = self.ensure_i64(*val);
+            self.builder.build_store(field_ptr, store_val)
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        }
+
+        // Allocate closure struct
+        let closure_struct_ty = self.context.struct_type(
+            &[ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        let closure_size = i64_ty.const_int(16, false);
+        let closure_ptr = self.builder
+            .build_call(self.functions["malloc"], &[closure_size.into()], "pa_closure")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_pointer_value();
+
+        let fn_slot = self.builder
+            .build_struct_gep(closure_struct_ty, closure_ptr, 0, "pa_fn_slot")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        self.builder.build_store(fn_slot, pa_fn.as_global_value().as_pointer_value())
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        let env_slot = self.builder
+            .build_struct_gep(closure_struct_ty, closure_ptr, 1, "pa_env_slot")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        self.builder.build_store(env_slot, env_alloc)
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        Ok(Some(closure_ptr.into()))
     }
 
     // ---- Compound type compilation ----
