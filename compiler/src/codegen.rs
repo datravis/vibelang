@@ -125,12 +125,16 @@ impl<'ctx> Codegen<'ctx> {
 
         let cpu = if self.target_triple.contains("aarch64-apple") {
             "apple-m1"
+        } else if self.target_triple.contains("x86_64") {
+            "x86-64"
         } else {
             "generic"
         };
 
         let features = if self.target_triple.contains("aarch64") {
             "+neon,+fp-armv8,+v8.5a"
+        } else if self.target_triple.contains("x86_64") {
+            "+sse2,+cx8"
         } else {
             ""
         };

@@ -24,7 +24,7 @@ enum Command {
         /// Output file path
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Target triple (default: aarch64-apple-darwin)
+        /// Target triple (aarch64-apple-darwin, x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc)
         #[arg(long, default_value = "aarch64-apple-darwin")]
         target: String,
         /// Emit LLVM IR instead of object code
@@ -51,6 +51,8 @@ enum Command {
         /// Source file to parse
         file: PathBuf,
     },
+    /// List supported compilation targets
+    Targets,
 }
 
 fn main() {
@@ -67,6 +69,7 @@ fn main() {
         Command::Run { file } => run_run(&file),
         Command::Lex { file } => run_lex(&file),
         Command::Parse { file } => run_parse(&file),
+        Command::Targets => run_targets(),
     };
 
     if let Err(e) = result {
@@ -122,6 +125,17 @@ fn run_build(
     }
 
     println!("Compiled: {}", out_path.display());
+    Ok(())
+}
+
+fn run_targets() -> Result<(), Box<dyn std::error::Error>> {
+    println!("Supported compilation targets:");
+    println!();
+    println!("  aarch64-apple-darwin      Apple Silicon (M1/M2/M3) macOS");
+    println!("  x86_64-unknown-linux-gnu  Linux x86-64 (glibc)");
+    println!("  x86_64-pc-windows-msvc    Windows x86-64 (MSVC ABI)");
+    println!();
+    println!("Usage: vibe build --target <TARGET> <file>");
     Ok(())
 }
 
