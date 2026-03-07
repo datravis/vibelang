@@ -1,0 +1,9 @@
+module main
+
+fn fib(n: Int) -> Int =
+    if n <= 1 then n
+    else fib(n - 1) + fib(n - 2)
+
+fn main() -> Int = do
+    print(fib(40))
+    0
