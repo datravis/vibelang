@@ -253,6 +253,52 @@ See the [`examples/`](examples/) directory:
 - [`pipeline.vibe`](examples/pipeline.vibe) — Pipeline operator with function chaining
 - [`types.vibe`](examples/types.vibe) — Algebraic types and pattern matching
 
+## Language Comparison
+
+### Feature Matrix
+
+| Feature | VibeLang | Haskell | OCaml | Rust | Go | Elixir |
+|---------|----------|---------|-------|------|----|--------|
+| Purely functional | Yes | Yes | No (mutable refs) | No | No | Functional-first |
+| Algebraic types + matching | Yes | Yes | Yes | Yes | No | Yes |
+| Pipeline operator | `\|>` | No (but `$`, `.`) | `\|>` | No | No | `\|>` |
+| Effect system | Algebraic effects | Monads | No | No | No | No |
+| Memory management | Regions + refcount | GC | GC | Ownership + borrow | GC | GC (BEAM) |
+| Null safety | No null | No null | `option` | `Option<T>` | nil exists | nil exists |
+| Concurrency model | `vibe` pipelines | STM / async | Threads | async / threads | Goroutines | Processes (BEAM) |
+| Compilation target | Native (LLVM) | Native (GHC) | Native (ocamlopt) | Native (LLVM) | Native | Bytecode (BEAM) |
+| Binary size | ~15 KB | ~1-5 MB | ~1-3 MB | ~3-4 MB | ~2 MB | N/A (VM) |
+| Learning curve | Moderate | Steep | Moderate | Steep | Easy | Moderate |
+
+### Closest Relatives
+
+**Haskell** is VibeLang's closest philosophical sibling — both are purely functional with effect tracking and algebraic types. VibeLang differs by using algebraic effects instead of monads (no monad transformer stacks), compiling to tiny binaries without a GC runtime, and prioritizing syntax regularity for LLM-assisted development. Haskell has a mature ecosystem, lazy evaluation, and type classes — VibeLang trades those for simplicity and predictable performance.
+
+**OCaml** shares VibeLang's ML-family syntax, native compilation, pattern matching, and pipeline operator. OCaml allows mutation and has no effect tracking, which makes it more pragmatic but less predictable. OCaml has a GC; VibeLang uses region inference. OCaml is battle-tested in compilers (Rust's original compiler, Flow, Coq); VibeLang targets data pipelines and concurrent services.
+
+**Rust** shares VibeLang's "no GC, native compilation, memory safety" goals but takes a fundamentally different approach. Rust uses ownership and borrowing with explicit lifetime annotations; VibeLang uses immutability to sidestep aliasing entirely, managing memory through compiler-inferred regions and refcounting. Rust is imperative-first; VibeLang is purely functional. Rust gives you control over every byte; VibeLang gives you safety with less ceremony.
+
+**Elixir/Erlang** shares VibeLang's pipeline-oriented, concurrent-by-default philosophy. Elixir's `|>` operator and process-based concurrency inspired VibeLang's `vibe` pipelines. The key difference is performance — Elixir runs on the BEAM VM with a GC; VibeLang compiles to native code. Elixir's ecosystem (Phoenix, Ecto, OTP) is mature; VibeLang is designed to eventually hit similar ergonomics with native speed.
+
+**F#** is another ML-family language with pipeline operators and algebraic types on the .NET runtime. F# is multi-paradigm (OOP + FP); VibeLang is purely functional. F# depends on .NET's GC and runtime; VibeLang is standalone with no runtime dependency.
+
+### When to Use VibeLang
+
+- **Data transformation pipelines** — the `vibe` keyword and pipeline operator make multi-stage data processing natural and automatically parallel
+- **Performance-critical functional code** — when you want ML-family ergonomics with native speed and no GC pauses
+- **Concurrent services** — immutable data means no data races by construction, no mutexes to manage
+- **Small deployment targets** — 15 KB binaries fit where Go and Rust binaries don't (embedded, lambdas, containers)
+- **LLM-assisted development** — the regular, unambiguous syntax is designed to be reliably generated and transformed by AI tools
+
+### When Not to Use VibeLang
+
+- **You need a mature ecosystem today** — VibeLang is in active development; it lacks a standard library, package manager, and third-party libraries. For production systems today, use Rust, Go, or Haskell
+- **Systems programming** — if you need to control memory layout, write a kernel module, or interface with hardware, Rust or C is the right tool. VibeLang intentionally hides memory details
+- **OOP codebases** — VibeLang has no classes, inheritance, or method dispatch. If your domain model is deeply object-oriented, languages like Kotlin, C#, or even OCaml (with its object system) are better fits
+- **Rapid prototyping / scripting** — Python, Elixir, or TypeScript will get you to a working prototype faster. VibeLang is compiled and statically typed; there's no REPL-first workflow
+- **GUI applications** — VibeLang has no GUI bindings and no C FFI yet. Desktop and mobile apps need something else for now
+- **Interop-heavy projects** — if you need to call C libraries, use Java APIs, or embed in an existing runtime, VibeLang's lack of FFI (planned for v0.2) is a blocker
+
 ## Specification
 
 See [spec/](spec/README.md) for the full language specification.
