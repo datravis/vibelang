@@ -5,5 +5,5 @@ fn fib(n: Int) -> Int =
     else fib(n - 1) + fib(n - 2)
 
 fn main() -> Int = do
-    print(fib(10))
+    print(fib(40))
     0

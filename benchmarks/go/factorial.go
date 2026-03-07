@@ -9,6 +9,14 @@ func factorial(n int64) int64 {
 	return n * factorial(n-1)
 }
 
+func runLoop(n int64, acc int64) int64 {
+	for n > 0 {
+		acc += factorial(20)
+		n--
+	}
+	return acc
+}
+
 func main() {
-	fmt.Println(factorial(12))
+	fmt.Println(runLoop(10000000, 0))
 }

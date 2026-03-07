@@ -4,5 +4,10 @@ def double(x):
 def add_one(x):
     return x + 1
 
-result = add_one(double(5))
-print(result)
+def square(x):
+    return x * x
+
+acc = 0
+for n in range(10000000, 0, -1):
+    acc += square(add_one(double(n)))
+print(acc)

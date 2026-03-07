@@ -6,7 +6,7 @@ use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue};
+use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::OptimizationLevel;
 use inkwell::{AddressSpace, IntPredicate, FloatPredicate};
 use std::collections::HashMap;
@@ -86,6 +86,10 @@ struct Codegen<'ctx> {
     target_triple: String,
     variables: Vec<HashMap<String, BasicValueEnum<'ctx>>>,
     functions: HashMap<String, FunctionValue<'ctx>>,
+    // TCO state: when compiling a tail-recursive function, these are set
+    tco_loop_header: Option<inkwell::basic_block::BasicBlock<'ctx>>,
+    tco_param_allocs: Vec<PointerValue<'ctx>>,
+    tco_fn_name: Option<String>,
 }
 
 impl<'ctx> Codegen<'ctx> {
@@ -108,6 +112,9 @@ impl<'ctx> Codegen<'ctx> {
             target_triple: target.to_string(),
             variables: vec![HashMap::new()],
             functions: HashMap::new(),
+            tco_loop_header: None,
+            tco_param_allocs: Vec::new(),
+            tco_fn_name: None,
         })
     }
 
@@ -246,37 +253,118 @@ impl<'ctx> Codegen<'ctx> {
         Ok(())
     }
 
+    fn has_tail_self_call(name: &str, expr: &Expr) -> bool {
+        match expr {
+            Expr::Call(func, _, _) => {
+                if let Expr::Ident(fn_name, _) = func.as_ref() {
+                    fn_name == name
+                } else {
+                    false
+                }
+            }
+            Expr::If(_, then_br, else_br, _) => {
+                Self::has_tail_self_call(name, then_br)
+                    || else_br
+                        .as_ref()
+                        .map(|e| Self::has_tail_self_call(name, e))
+                        .unwrap_or(false)
+            }
+            Expr::DoBlock(exprs, _) => exprs
+                .last()
+                .map(|e| Self::has_tail_self_call(name, e))
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
     fn compile_function(&mut self, decl: &FnDecl) -> Result<(), CodegenError> {
         let function = *self
             .functions
             .get(&decl.name)
             .ok_or_else(|| CodegenError::UndefinedVar(decl.name.clone()))?;
 
+        let is_tail_recursive =
+            !decl.params.is_empty() && Self::has_tail_self_call(&decl.name, &decl.body);
+
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
         self.push_scope();
 
-        // Bind parameters
-        for (i, param) in decl.params.iter().enumerate() {
-            let val = function.get_nth_param(i as u32).unwrap();
-            val.set_name(&param.name);
-            self.set_var(param.name.clone(), val);
-        }
-
-        let result = self.compile_expr(&decl.body, function)?;
-
-        // Build return
-        match result {
-            Some(val) => {
-                self.builder.build_return(Some(&val))
+        if is_tail_recursive {
+            // TCO: allocate stack slots for params, create loop header
+            let mut allocs = Vec::new();
+            for (i, param) in decl.params.iter().enumerate() {
+                let val = function.get_nth_param(i as u32).unwrap();
+                let alloca = self.builder.build_alloca(self.context.i64_type(), &param.name)
                     .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                let store_val = if val.is_int_value() && val.into_int_value().get_type().get_bit_width() != 64 {
+                    self.builder.build_int_z_extend(val.into_int_value(), self.context.i64_type(), "zext")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?.into()
+                } else {
+                    val
+                };
+                self.builder.build_store(alloca, store_val)
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                allocs.push(alloca);
             }
-            None => {
-                // Return 0 for void-ish functions
-                let zero = self.context.i64_type().const_int(0, false);
-                self.builder.build_return(Some(&zero))
+
+            let loop_header = self.context.append_basic_block(function, "tco_loop");
+            self.builder.build_unconditional_branch(loop_header)
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            self.builder.position_at_end(loop_header);
+
+            // Load params from allocas
+            for (i, param) in decl.params.iter().enumerate() {
+                let loaded = self.builder.build_load(self.context.i64_type(), allocs[i], &param.name)
                     .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                self.set_var(param.name.clone(), loaded);
+            }
+
+            // Set TCO state
+            self.tco_loop_header = Some(loop_header);
+            self.tco_param_allocs = allocs;
+            self.tco_fn_name = Some(decl.name.clone());
+
+            let result = self.compile_expr(&decl.body, function)?;
+
+            // Clear TCO state
+            self.tco_loop_header = None;
+            self.tco_param_allocs.clear();
+            self.tco_fn_name = None;
+
+            // Return (only reached for non-tail-call branches)
+            match result {
+                Some(val) => {
+                    self.builder.build_return(Some(&val))
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                }
+                None => {
+                    let zero = self.context.i64_type().const_int(0, false);
+                    self.builder.build_return(Some(&zero))
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                }
+            }
+        } else {
+            // Non-tail-recursive: normal compilation
+            for (i, param) in decl.params.iter().enumerate() {
+                let val = function.get_nth_param(i as u32).unwrap();
+                val.set_name(&param.name);
+                self.set_var(param.name.clone(), val);
+            }
+
+            let result = self.compile_expr(&decl.body, function)?;
+
+            match result {
+                Some(val) => {
+                    self.builder.build_return(Some(&val))
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                }
+                None => {
+                    let zero = self.context.i64_type().const_int(0, false);
+                    self.builder.build_return(Some(&zero))
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                }
             }
         }
 
@@ -452,6 +540,36 @@ impl<'ctx> Codegen<'ctx> {
                 if let Expr::Ident(name, _) = func_expr.as_ref() {
                     if name == "print" {
                         return self.compile_print(args, function);
+                    }
+
+                    // TCO: if this is a tail-recursive self-call, emit a loop jump
+                    if self.tco_fn_name.as_deref() == Some(name.as_str()) {
+                        if let Some(loop_header) = self.tco_loop_header {
+                            let allocs = self.tco_param_allocs.clone();
+                            // Evaluate all args first (before storing)
+                            let mut compiled_args = Vec::new();
+                            for a in args {
+                                let val = self.compile_expr(a, function)?.unwrap();
+                                compiled_args.push(val);
+                            }
+                            // Store new values into param allocas
+                            for (i, val) in compiled_args.iter().enumerate() {
+                                let store_val = self.ensure_i64(*val);
+                                self.builder.build_store(allocs[i], store_val)
+                                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            }
+                            // Branch back to loop header
+                            self.builder.build_unconditional_branch(loop_header)
+                                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+                            // Create an unreachable block for subsequent code
+                            let dead_bb = self.context.append_basic_block(function, "tco.dead");
+                            self.builder.position_at_end(dead_bb);
+
+                            // Return a dummy value (this block is unreachable)
+                            let dummy = self.context.i64_type().const_int(0, false);
+                            return Ok(Some(dummy.into()));
+                        }
                     }
 
                     if let Some(func) = self.functions.get(name).copied() {
