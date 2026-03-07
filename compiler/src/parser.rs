@@ -363,6 +363,34 @@ impl Parser {
                     Ok(first)
                 }
             }
+            TokenKind::Fn => {
+                // Function type: fn(A, B) -> C
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let mut param_types = Vec::new();
+                if *self.peek() != TokenKind::RParen {
+                    param_types.push(self.parse_type_expr()?);
+                    while *self.peek() == TokenKind::Comma {
+                        self.advance();
+                        param_types.push(self.parse_type_expr()?);
+                    }
+                }
+                self.expect(&TokenKind::RParen)?;
+                self.expect(&TokenKind::Arrow)?;
+                let ret = self.parse_type_expr()?;
+                let effects = if *self.peek() == TokenKind::With {
+                    self.advance();
+                    let mut effs = vec![self.parse_type_expr()?];
+                    while *self.peek() == TokenKind::Comma {
+                        self.advance();
+                        effs.push(self.parse_type_expr()?);
+                    }
+                    effs
+                } else {
+                    Vec::new()
+                };
+                Ok(TypeExpr::Function(param_types, Box::new(ret), effects))
+            }
             TokenKind::Ident(name) => {
                 // Lowercase type name (type variable or builtin alias)
                 self.advance();
@@ -1198,6 +1226,11 @@ impl Parser {
         let span = self.span();
         self.expect(&TokenKind::Fn)?;
         let params = self.parse_params()?;
+        // Optional return type annotation: -> Type
+        if *self.peek() == TokenKind::Arrow {
+            self.advance();
+            let _ret_type = self.parse_type_expr()?;
+        }
         self.expect(&TokenKind::Eq)?;
         let body = self.parse_expr()?;
         Ok(Expr::Lambda(params, Box::new(body), span))

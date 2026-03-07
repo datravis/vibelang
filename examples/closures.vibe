@@ -1,0 +1,43 @@
+module main
+
+-- Basic lambda: no captures
+fn apply(f: fn(Int) -> Int, x: Int) -> Int = f(x)
+
+-- Higher-order: returns result of applying a function
+fn double(x: Int) -> Int = x * 2
+fn square(x: Int) -> Int = x * x
+
+-- Closure with capture
+fn make_adder(n: Int) -> fn(Int) -> Int =
+    fn(x: Int) -> Int = x + n
+
+-- Closure over multiple variables
+fn make_linear(a: Int, b: Int) -> fn(Int) -> Int =
+    fn(x: Int) -> Int = a * x + b
+
+fn main() -> Int = do
+    -- Test 1: Lambda passed directly
+    let result1 = apply(fn(x: Int) -> Int = x + 10, 5)
+    print(result1)
+
+    -- Test 2: Named function passed as value then called via pipe
+    let result2 = 7 |> double
+    print(result2)
+
+    -- Test 3: Closure capturing a variable
+    let add5 = make_adder(5)
+    let result3 = add5(10)
+    print(result3)
+
+    -- Test 4: Closure capturing multiple variables
+    let linear = make_linear(3, 7)
+    let result4 = linear(4)
+    print(result4)
+
+    -- Test 5: Short lambda syntax with capture
+    let offset = 100
+    let shifted = fn(x: Int) -> Int = x + offset
+    let result5 = shifted(42)
+    print(result5)
+
+    0

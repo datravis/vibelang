@@ -117,6 +117,10 @@ struct Codegen<'ctx> {
     /// Current escape info for the function being compiled
     current_escape_info: Option<EscapeInfo>,
 
+    // --- Closures ---
+    /// Counter for generating unique lambda function names
+    lambda_counter: usize,
+
     // --- Effect system ---
     /// Effect definitions: effect_name -> [(op_name, param_count)]
     effect_defs: HashMap<String, Vec<(String, usize)>>,
@@ -156,6 +160,7 @@ impl<'ctx> Codegen<'ctx> {
             constructor_info: HashMap::new(),
             region_stack: Vec::new(),
             current_escape_info: None,
+            lambda_counter: 0,
             effect_defs: HashMap::new(),
             effect_ops: HashMap::new(),
             handler_stack_global: None,
@@ -1049,25 +1054,15 @@ impl<'ctx> Codegen<'ctx> {
                     }
                 }
 
-                // Indirect call via function pointer
+                // Indirect call — the callee is a closure struct {fn_ptr, env_ptr}
                 let callee = self.compile_expr(func_expr, function)?.unwrap();
-                let compiled_args: Result<Vec<BasicMetadataValueEnum>, _> = args
+                let compiled_args: Result<Vec<BasicValueEnum>, _> = args
                     .iter()
-                    .map(|a| self.compile_expr(a, function).map(|v| v.unwrap().into()))
+                    .map(|a| self.compile_expr(a, function).map(|v| v.unwrap()))
                     .collect();
+                let compiled_args = compiled_args?;
 
-                // For indirect calls, we need to construct the function type
-                let param_types: Vec<BasicMetadataTypeEnum> = args
-                    .iter()
-                    .map(|_| BasicMetadataTypeEnum::IntType(self.context.i64_type()))
-                    .collect();
-                let fn_type = self.context.i64_type().fn_type(&param_types, false);
-
-                let result = self
-                    .builder
-                    .build_indirect_call(fn_type, callee.into_pointer_value(), &compiled_args?, "icall")
-                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                Ok(result.try_as_basic_value().left())
+                self.compile_closure_call(callee, &compiled_args, function)
             }
 
             Expr::If(cond, then_br, else_br, _) => {
@@ -1405,43 +1400,30 @@ impl<'ctx> Codegen<'ctx> {
                                 .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                             return Ok(result.try_as_basic_value().left());
                         }
+
+                        // Could be a variable holding a closure
+                        if let Some(closure_val) = self.get_var(name) {
+                            if closure_val.is_pointer_value() {
+                                return self.compile_closure_call(closure_val, &[input_val], function);
+                            }
+                        }
+                    }
+
+                    // Fallback: evaluate rhs as a closure and call it with input
+                    let rhs_val = self.compile_expr(rhs, function)?;
+                    if let Some(rhs_v) = rhs_val {
+                        if rhs_v.is_pointer_value() {
+                            return self.compile_closure_call(rhs_v, &[input_val], function);
+                        }
                     }
                 }
 
-                // Fallback: just evaluate rhs
+                // Last resort fallback: just evaluate rhs
                 self.compile_expr(rhs, function)
             }
 
             Expr::Lambda(params, body, _) => {
-                // Compile lambda as a separate function
-                let param_types: Vec<BasicMetadataTypeEnum> = params
-                    .iter()
-                    .map(|_| BasicMetadataTypeEnum::IntType(self.context.i64_type()))
-                    .collect();
-                let fn_type = self.context.i64_type().fn_type(&param_types, false);
-                let lambda_fn = self.llvm_module.add_function("lambda", fn_type, None);
-
-                let prev_bb = self.builder.get_insert_block();
-                let entry = self.context.append_basic_block(lambda_fn, "entry");
-                self.builder.position_at_end(entry);
-
-                self.push_scope();
-                for (i, p) in params.iter().enumerate() {
-                    let val = lambda_fn.get_nth_param(i as u32).unwrap();
-                    self.set_var(p.name.clone(), val);
-                }
-
-                let result = self.compile_expr(body, lambda_fn)?;
-                let ret_val = result.unwrap_or_else(|| self.context.i64_type().const_int(0, false).into());
-                self.builder.build_return(Some(&ret_val))
-                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                self.pop_scope();
-
-                if let Some(bb) = prev_bb {
-                    self.builder.position_at_end(bb);
-                }
-
-                Ok(Some(lambda_fn.as_global_value().as_pointer_value().into()))
+                self.compile_lambda(params, body, function)
             }
 
             Expr::List(elems, _) => {
@@ -1493,6 +1475,373 @@ impl<'ctx> Codegen<'ctx> {
                 self.compile_vibe_pipeline(source, stages, function)
             }
         }
+    }
+
+    // ---- Closure compilation ----
+
+    /// Collect free variables in an expression that are not bound by lambda params or local lets.
+    fn collect_free_vars(expr: &Expr, bound: &mut Vec<String>, free: &mut Vec<String>) {
+        match expr {
+            Expr::Ident(name, _) => {
+                if !bound.contains(name) && !free.contains(name) {
+                    free.push(name.clone());
+                }
+            }
+            Expr::IntLit(_, _) | Expr::FloatLit(_, _) | Expr::StringLit(_, _)
+            | Expr::CharLit(_, _) | Expr::BoolLit(_, _) | Expr::UnitLit(_)
+            | Expr::TypeConstructor(_, _) => {}
+
+            Expr::List(elems, _) | Expr::Tuple(elems, _) | Expr::DoBlock(elems, _) => {
+                for e in elems {
+                    Self::collect_free_vars(e, bound, free);
+                }
+            }
+            Expr::Record(fields, _) => {
+                for (_, e) in fields {
+                    Self::collect_free_vars(e, bound, free);
+                }
+            }
+            Expr::RecordUpdate(base, fields, _) => {
+                Self::collect_free_vars(base, bound, free);
+                for (_, e) in fields {
+                    Self::collect_free_vars(e, bound, free);
+                }
+            }
+            Expr::FieldAccess(base, _, _) => {
+                Self::collect_free_vars(base, bound, free);
+            }
+            Expr::BinOp(l, _, r, _) | Expr::Pipe(l, r, _) | Expr::Pmap(l, r, _) => {
+                Self::collect_free_vars(l, bound, free);
+                Self::collect_free_vars(r, bound, free);
+            }
+            Expr::UnaryOp(_, inner, _) | Expr::Resume(inner, _) => {
+                Self::collect_free_vars(inner, bound, free);
+            }
+            Expr::Call(func, args, _) => {
+                Self::collect_free_vars(func, bound, free);
+                for a in args {
+                    Self::collect_free_vars(a, bound, free);
+                }
+            }
+            Expr::Lambda(params, body, _) => {
+                let mut inner_bound = bound.clone();
+                for p in params {
+                    inner_bound.push(p.name.clone());
+                }
+                Self::collect_free_vars(body, &mut inner_bound, free);
+            }
+            Expr::If(cond, then_br, else_br, _) => {
+                Self::collect_free_vars(cond, bound, free);
+                Self::collect_free_vars(then_br, bound, free);
+                if let Some(e) = else_br {
+                    Self::collect_free_vars(e, bound, free);
+                }
+            }
+            Expr::Match(scrut, arms, _) => {
+                Self::collect_free_vars(scrut, bound, free);
+                for arm in arms {
+                    let mut arm_bound = bound.clone();
+                    Self::collect_pattern_bindings(&arm.pattern, &mut arm_bound);
+                    if let Some(g) = &arm.guard {
+                        Self::collect_free_vars(g, &mut arm_bound, free);
+                    }
+                    Self::collect_free_vars(&arm.body, &mut arm_bound, free);
+                }
+            }
+            Expr::Let(pat, _, val, body, _) => {
+                Self::collect_free_vars(val, bound, free);
+                let mut inner_bound = bound.clone();
+                Self::collect_pattern_bindings(pat, &mut inner_bound);
+                Self::collect_free_vars(body, &mut inner_bound, free);
+            }
+            Expr::LetBind(pat, _, val, _) => {
+                Self::collect_free_vars(val, bound, free);
+                Self::collect_pattern_bindings(pat, bound);
+            }
+            Expr::Handle(body, handlers, _) => {
+                Self::collect_free_vars(body, bound, free);
+                for h in handlers {
+                    let mut h_bound = bound.clone();
+                    for p in &h.params {
+                        h_bound.push(p.clone());
+                    }
+                    Self::collect_free_vars(&h.body, &mut h_bound, free);
+                }
+            }
+            Expr::Perform(_, _, args, _) => {
+                for a in args {
+                    Self::collect_free_vars(a, bound, free);
+                }
+            }
+            Expr::Par(exprs, _) => {
+                for e in exprs {
+                    Self::collect_free_vars(e, bound, free);
+                }
+            }
+            Expr::VibePipeline(source, stages, _) => {
+                Self::collect_free_vars(source, bound, free);
+                for stage in stages {
+                    match stage {
+                        PipelineStage::Map(e) | PipelineStage::Filter(e)
+                        | PipelineStage::FlatMap(e) | PipelineStage::FilterMap(e)
+                        | PipelineStage::Take(e) | PipelineStage::Drop(e)
+                        | PipelineStage::TakeWhile(e) | PipelineStage::DropWhile(e)
+                        | PipelineStage::ForEach(e) | PipelineStage::SortBy(e)
+                        | PipelineStage::GroupBy(e) | PipelineStage::Chunk(e)
+                        | PipelineStage::Any(e) | PipelineStage::All(e)
+                        | PipelineStage::Reduce(e) | PipelineStage::Inspect(e) => {
+                            Self::collect_free_vars(e, bound, free);
+                        }
+                        PipelineStage::Fold(a, b) | PipelineStage::Scan(a, b) => {
+                            Self::collect_free_vars(a, bound, free);
+                            Self::collect_free_vars(b, bound, free);
+                        }
+                        PipelineStage::Collect | PipelineStage::Count
+                        | PipelineStage::First | PipelineStage::Last
+                        | PipelineStage::Distinct => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// Extract variable names introduced by a pattern.
+    fn collect_pattern_bindings(pat: &Pattern, bound: &mut Vec<String>) {
+        match pat {
+            Pattern::Ident(name, _) => bound.push(name.clone()),
+            Pattern::Constructor(_, pats, _) | Pattern::Tuple(pats, _) => {
+                for p in pats {
+                    Self::collect_pattern_bindings(p, bound);
+                }
+            }
+            Pattern::Record(fields, _) => {
+                for (_, p) in fields {
+                    Self::collect_pattern_bindings(p, bound);
+                }
+            }
+            _ => {} // Wildcard, literals — no bindings
+        }
+    }
+
+    /// Compile a lambda expression into a closure: a heap-allocated `{fn_ptr, env_ptr}` pair.
+    ///
+    /// Closure layout (2 pointers):
+    ///   slot 0: fn_ptr  — pointer to the lifted function (env_ptr as first arg, then params)
+    ///   slot 1: env_ptr — pointer to captured environment struct, or null if no captures
+    ///
+    /// The lifted function signature: `fn(env: ptr, p0: i64, p1: i64, ...) -> i64`
+    /// For lambdas with no captures, env is still passed but ignored.
+    fn compile_lambda(
+        &mut self,
+        params: &[Param],
+        body: &Expr,
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        // Generate unique name
+        let lambda_id = self.lambda_counter;
+        self.lambda_counter += 1;
+        let lambda_name = format!("__lambda_{}", lambda_id);
+
+        // Collect free variables (variables captured from the enclosing scope)
+        let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+        let mut bound = param_names.clone();
+        // Also treat known top-level functions as bound (not captured)
+        for fname in self.functions.keys() {
+            bound.push(fname.clone());
+        }
+        let mut free_vars = Vec::new();
+        Self::collect_free_vars(body, &mut bound, &mut free_vars);
+
+        // Filter to only variables actually available in the current scope
+        let captures: Vec<(String, BasicValueEnum<'ctx>)> = free_vars
+            .iter()
+            .filter_map(|name| {
+                self.get_var(name).map(|val| (name.clone(), val))
+            })
+            .collect();
+
+        // Build the lifted function type: fn(env_ptr, param0, param1, ...) -> i64
+        let mut lifted_param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
+        lifted_param_types.push(BasicMetadataTypeEnum::PointerType(ptr_ty)); // env ptr
+        for p in params {
+            lifted_param_types.push(self.resolve_param_type(p));
+        }
+        let fn_type = i64_ty.fn_type(&lifted_param_types, false);
+        let lambda_fn = self.llvm_module.add_function(&lambda_name, fn_type, None);
+
+        // Save current builder position
+        let prev_bb = self.builder.get_insert_block();
+
+        // Compile the lambda body in the new function
+        let entry = self.context.append_basic_block(lambda_fn, "entry");
+        self.builder.position_at_end(entry);
+
+        self.push_scope();
+
+        // Load captured variables from env struct
+        let env_ptr = lambda_fn.get_nth_param(0).unwrap().into_pointer_value();
+        if !captures.is_empty() {
+            let env_struct_ty = self.context.struct_type(
+                &vec![i64_ty.into(); captures.len()],
+                false,
+            );
+            for (i, (name, _)) in captures.iter().enumerate() {
+                let field_ptr = self.builder
+                    .build_struct_gep(env_struct_ty, env_ptr, i as u32, &format!("env.{}", name))
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                let loaded = self.builder
+                    .build_load(i64_ty, field_ptr, &name)
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                self.set_var(name.clone(), loaded);
+            }
+        }
+
+        // Bind lambda parameters (starting at index 1 because 0 is env)
+        for (i, p) in params.iter().enumerate() {
+            let val = lambda_fn.get_nth_param((i + 1) as u32).unwrap();
+            val.set_name(&p.name);
+            self.set_var(p.name.clone(), val);
+        }
+
+        let result = self.compile_expr(body, lambda_fn)?;
+        let ret_val = result.unwrap_or_else(|| i64_ty.const_int(0, false).into());
+        let ret_val = self.ensure_i64(ret_val);
+        self.builder.build_return(Some(&ret_val))
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        self.pop_scope();
+
+        // Restore builder position
+        if let Some(bb) = prev_bb {
+            self.builder.position_at_end(bb);
+        }
+
+        // Allocate the environment struct on the heap (if captures exist)
+        let env_alloc = if captures.is_empty() {
+            ptr_ty.const_null()
+        } else {
+            let env_size = i64_ty.const_int((captures.len() * 8) as u64, false);
+            let malloc_fn = self.functions["malloc"];
+            let env_raw = self.builder
+                .build_call(malloc_fn, &[env_size.into()], "env_alloc")
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                .try_as_basic_value()
+                .left()
+                .unwrap()
+                .into_pointer_value();
+
+            // Store captured values into the env struct
+            let env_struct_ty = self.context.struct_type(
+                &vec![i64_ty.into(); captures.len()],
+                false,
+            );
+            for (i, (_, val)) in captures.iter().enumerate() {
+                let field_ptr = self.builder
+                    .build_struct_gep(env_struct_ty, env_raw, i as u32, &format!("env_store_{}", i))
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                let store_val = self.ensure_i64(*val);
+                self.builder.build_store(field_ptr, store_val)
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            }
+            env_raw
+        };
+
+        // Allocate the closure struct: { fn_ptr, env_ptr }
+        let closure_struct_ty = self.context.struct_type(
+            &[ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        let closure_size = i64_ty.const_int(16, false); // 2 pointers
+        let closure_ptr = self.builder
+            .build_call(self.functions["malloc"], &[closure_size.into()], "closure_alloc")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_pointer_value();
+
+        // Store fn_ptr
+        let fn_ptr_slot = self.builder
+            .build_struct_gep(closure_struct_ty, closure_ptr, 0, "closure.fn")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        let fn_as_ptr = lambda_fn.as_global_value().as_pointer_value();
+        self.builder.build_store(fn_ptr_slot, fn_as_ptr)
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        // Store env_ptr
+        let env_ptr_slot = self.builder
+            .build_struct_gep(closure_struct_ty, closure_ptr, 1, "closure.env")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        self.builder.build_store(env_ptr_slot, env_alloc)
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// Call a closure value. The closure is a pointer to `{fn_ptr, env_ptr}`.
+    /// We extract both, then call `fn_ptr(env_ptr, args...)`.
+    fn compile_closure_call(
+        &mut self,
+        callee: BasicValueEnum<'ctx>,
+        args: &[BasicValueEnum<'ctx>],
+        _function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        let closure_struct_ty = self.context.struct_type(
+            &[ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+
+        let closure_ptr = if callee.is_pointer_value() {
+            callee.into_pointer_value()
+        } else {
+            // It might be an i64 encoding of a pointer — convert
+            self.builder
+                .build_int_to_ptr(callee.into_int_value(), ptr_ty, "itop")
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?
+        };
+
+        // Load fn_ptr from closure[0]
+        let fn_ptr_slot = self.builder
+            .build_struct_gep(closure_struct_ty, closure_ptr, 0, "closure.fn.ptr")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        let fn_ptr = self.builder
+            .build_load(ptr_ty, fn_ptr_slot, "fn_ptr")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?
+            .into_pointer_value();
+
+        // Load env_ptr from closure[1]
+        let env_ptr_slot = self.builder
+            .build_struct_gep(closure_struct_ty, closure_ptr, 1, "closure.env.ptr")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        let env_ptr = self.builder
+            .build_load(ptr_ty, env_ptr_slot, "env_ptr")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        // Build indirect call: fn_ptr(env_ptr, arg0, arg1, ...)
+        let mut call_args: Vec<BasicMetadataValueEnum> = Vec::new();
+        call_args.push(env_ptr.into());
+        for a in args {
+            call_args.push((*a).into());
+        }
+
+        // Build the function type: fn(ptr, i64, i64, ...) -> i64
+        let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
+        param_types.push(BasicMetadataTypeEnum::PointerType(ptr_ty));
+        for _ in args {
+            param_types.push(BasicMetadataTypeEnum::IntType(i64_ty));
+        }
+        let fn_type = i64_ty.fn_type(&param_types, false);
+
+        let result = self.builder
+            .build_indirect_call(fn_type, fn_ptr, &call_args, "closure_call")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        Ok(result.try_as_basic_value().left())
     }
 
     // ---- Compound type compilation ----
