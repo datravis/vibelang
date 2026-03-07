@@ -93,6 +93,10 @@ struct TypeChecker {
     effect_defs: HashMap<String, Vec<(String, Vec<Type>, Type)>>,
     /// All effect operation names -> (effect_name, param_types, return_type)
     effect_ops: HashMap<String, (String, Vec<Type>, Type)>,
+    /// Trait definitions: trait_name -> list of (method_name, param_types, return_type)
+    trait_defs: HashMap<String, Vec<(String, Vec<Type>, Type)>>,
+    /// Trait implementations: (trait_name, target_type) -> list of method names
+    trait_impls: HashMap<(String, String), Vec<String>>,
     next_var: usize,
 }
 
@@ -124,6 +128,8 @@ impl TypeChecker {
             type_defs: HashMap::new(),
             effect_defs: HashMap::new(),
             effect_ops: HashMap::new(),
+            trait_defs: HashMap::new(),
+            trait_impls: HashMap::new(),
             next_var: 0,
         }
     }
@@ -501,6 +507,74 @@ pub fn check(module: &Module) -> Result<(), TypeError> {
         }
     }
 
+    // Register trait definitions and bring trait methods into scope
+    for decl in &module.declarations {
+        if let Decl::TraitDef(td) = decl {
+            let mut methods = Vec::new();
+            for m in &td.methods {
+                let param_types: Vec<Type> = m
+                    .params
+                    .iter()
+                    .map(|p| {
+                        p.type_ann
+                            .as_ref()
+                            .map(|ta| checker.resolve_type_expr(ta))
+                            .unwrap_or(Type::Unknown)
+                    })
+                    .collect();
+                let ret = m
+                    .return_type
+                    .as_ref()
+                    .map(|r| checker.resolve_type_expr(r))
+                    .unwrap_or(Type::Unknown);
+                methods.push((m.name.clone(), param_types.clone(), ret.clone()));
+                // Register trait methods as callable functions
+                checker.define(
+                    m.name.clone(),
+                    Type::Fn(param_types, Box::new(ret)),
+                );
+            }
+            checker.trait_defs.insert(td.name.clone(), methods);
+        }
+    }
+
+    // Register trait implementations
+    for decl in &module.declarations {
+        if let Decl::ImplBlock(ib) = decl {
+            let target_name = match &ib.target {
+                TypeExpr::Named(name, _) => name.clone(),
+                _ => "Unknown".to_string(),
+            };
+            let method_names: Vec<String> = ib.methods.iter().map(|m| m.name.clone()).collect();
+            checker.trait_impls.insert(
+                (ib.trait_name.clone(), target_name),
+                method_names,
+            );
+            // Register impl methods as functions (with their concrete types)
+            for m in &ib.methods {
+                let param_types: Vec<Type> = m
+                    .params
+                    .iter()
+                    .map(|p| {
+                        p.type_ann
+                            .as_ref()
+                            .map(|ta| checker.resolve_type_expr(ta))
+                            .unwrap_or(Type::Unknown)
+                    })
+                    .collect();
+                let ret = m
+                    .return_type
+                    .as_ref()
+                    .map(|r| checker.resolve_type_expr(r))
+                    .unwrap_or(Type::Unknown);
+                checker.define(
+                    m.name.clone(),
+                    Type::Fn(param_types, Box::new(ret)),
+                );
+            }
+        }
+    }
+
     // Register effect definitions and bring operations into scope
     for decl in &module.declarations {
         if let Decl::EffectDef(ed) = decl {
@@ -580,7 +654,7 @@ pub fn check(module: &Module) -> Result<(), TypeError> {
         }
     }
 
-    // Third pass: check function bodies
+    // Third pass: check function bodies (including impl block methods)
     for decl in &module.declarations {
         match decl {
             Decl::Function(f) => checker.check_fn_decl(f)?,
@@ -596,6 +670,11 @@ pub fn check(module: &Module) -> Result<(), TypeError> {
                     span: v.span,
                 };
                 checker.check_fn_decl(&fn_decl)?;
+            }
+            Decl::ImplBlock(ib) => {
+                for method in &ib.methods {
+                    checker.check_fn_decl(method)?;
+                }
             }
             _ => {}
         }

@@ -92,6 +92,17 @@ pub fn jit_run(module: &crate::ast::Module, opt_level: u8) -> Result<(), Box<dyn
     Ok(())
 }
 
+/// Information about a trait definition
+#[derive(Debug, Clone)]
+struct TraitInfo {
+    /// Type parameters for the trait
+    type_params: Vec<String>,
+    /// Required (superclass) traits
+    requires: Vec<String>,
+    /// Method signatures: (method_name, param_count, method_decl)
+    methods: Vec<(String, usize, FnDecl)>,
+}
+
 struct Codegen<'ctx> {
     context: &'ctx Context,
     llvm_module: LLVMModule<'ctx>,
@@ -132,6 +143,15 @@ struct Codegen<'ctx> {
     handler_stack_global: Option<PointerValue<'ctx>>,
     /// Global handler stack top counter
     handler_top_global: Option<PointerValue<'ctx>>,
+
+    // --- Trait system ---
+    /// Trait definitions: trait_name -> (type_params, required_traits, method_signatures)
+    /// method_signatures: [(method_name, param_count)]
+    trait_defs: HashMap<String, TraitInfo>,
+    /// Trait implementations: (trait_name, target_type_name) -> [(method_name, mangled_fn_name)]
+    trait_impls: HashMap<(String, String), Vec<(String, String)>>,
+    /// Trait method -> trait_name mapping for dispatch
+    trait_methods: HashMap<String, String>,
 }
 
 impl<'ctx> Codegen<'ctx> {
@@ -168,6 +188,9 @@ impl<'ctx> Codegen<'ctx> {
             effect_ops: HashMap::new(),
             handler_stack_global: None,
             handler_top_global: None,
+            trait_defs: HashMap::new(),
+            trait_impls: HashMap::new(),
+            trait_methods: HashMap::new(),
         })
     }
 
@@ -261,16 +284,17 @@ impl<'ctx> Codegen<'ctx> {
         self.declare_concurrency_runtime();
         self.declare_pipeline_runtime();
 
-        // Pass 0: register type definitions (records, variants)
+        // Pass 0: register type definitions (records, variants) and traits
         for decl in &module.declarations {
             match decl {
                 Decl::TypeDef(td) => self.register_type_def(td)?,
                 Decl::EffectDef(ed) => self.register_effect_def(ed)?,
+                Decl::TraitDef(td) => self.register_trait_def(td)?,
                 _ => {}
             }
         }
 
-        // First pass: declare all functions (including vibe declarations)
+        // First pass: declare all functions (including vibe declarations and impl blocks)
         for decl in &module.declarations {
             match decl {
                 Decl::Function(f) => self.declare_function(f)?,
@@ -286,11 +310,12 @@ impl<'ctx> Codegen<'ctx> {
                     };
                     self.declare_function(&fn_decl)?;
                 }
+                Decl::ImplBlock(ib) => self.declare_impl_block(ib)?,
                 _ => {}
             }
         }
 
-        // Second pass: compile function bodies
+        // Second pass: compile function bodies (including impl blocks)
         for decl in &module.declarations {
             match decl {
                 Decl::Function(f) => self.compile_function(f)?,
@@ -306,6 +331,7 @@ impl<'ctx> Codegen<'ctx> {
                     };
                     self.compile_function(&fn_decl)?;
                 }
+                Decl::ImplBlock(ib) => self.compile_impl_block(ib)?,
                 _ => {}
             }
         }
@@ -328,6 +354,147 @@ impl<'ctx> Codegen<'ctx> {
         }
         self.effect_defs.insert(ed.name.clone(), ops);
         Ok(())
+    }
+
+    /// Register a trait definition: record method signatures for later dispatch.
+    fn register_trait_def(&mut self, td: &TraitDef) -> Result<(), CodegenError> {
+        let methods: Vec<(String, usize, FnDecl)> = td
+            .methods
+            .iter()
+            .map(|m| (m.name.clone(), m.params.len(), m.clone()))
+            .collect();
+
+        // Record which methods belong to this trait
+        for m in &td.methods {
+            self.trait_methods.insert(m.name.clone(), td.name.clone());
+        }
+
+        let requires: Vec<String> = td.requires.iter().map(|r| {
+            match r {
+                TypeExpr::Named(name, _) => name.clone(),
+                _ => String::new(),
+            }
+        }).filter(|s| !s.is_empty()).collect();
+
+        self.trait_defs.insert(td.name.clone(), TraitInfo {
+            type_params: td.type_params.clone(),
+            requires,
+            methods,
+        });
+        Ok(())
+    }
+
+    /// Resolve a TypeExpr to a string name for trait impl keying.
+    fn type_expr_to_name(ty: &TypeExpr) -> String {
+        match ty {
+            TypeExpr::Named(name, args) => {
+                if args.is_empty() {
+                    name.clone()
+                } else {
+                    let arg_names: Vec<String> = args.iter().map(Self::type_expr_to_name).collect();
+                    format!("{}_{}", name, arg_names.join("_"))
+                }
+            }
+            TypeExpr::Tuple(types) => {
+                let names: Vec<String> = types.iter().map(Self::type_expr_to_name).collect();
+                format!("Tuple_{}", names.join("_"))
+            }
+            TypeExpr::Unit => "Unit".to_string(),
+            _ => "Unknown".to_string(),
+        }
+    }
+
+    /// Declare all functions from an impl block with mangled names.
+    fn declare_impl_block(&mut self, ib: &ImplBlock) -> Result<(), CodegenError> {
+        let target_name = Self::type_expr_to_name(&ib.target);
+        let mut method_mappings = Vec::new();
+
+        for method in &ib.methods {
+            // Mangled name: TraitName$TargetType$method_name
+            let mangled = format!("{}${}${}", ib.trait_name, target_name, method.name);
+
+            // Create FnDecl with mangled name for declaration
+            let mangled_decl = FnDecl {
+                public: method.public,
+                name: mangled.clone(),
+                params: method.params.clone(),
+                return_type: method.return_type.clone(),
+                effects: method.effects.clone(),
+                body: method.body.clone(),
+                span: method.span,
+            };
+            self.declare_function(&mangled_decl)?;
+            method_mappings.push((method.name.clone(), mangled));
+        }
+
+        self.trait_impls.insert(
+            (ib.trait_name.clone(), target_name),
+            method_mappings,
+        );
+        Ok(())
+    }
+
+    /// Compile all method bodies from an impl block.
+    fn compile_impl_block(&mut self, ib: &ImplBlock) -> Result<(), CodegenError> {
+        let target_name = Self::type_expr_to_name(&ib.target);
+        let key = (ib.trait_name.clone(), target_name);
+
+        // Get the mangled names we registered earlier
+        let method_mappings = self.trait_impls.get(&key).cloned()
+            .ok_or_else(|| CodegenError::General(
+                format!("impl block for {} on {} was not declared", ib.trait_name, Self::type_expr_to_name(&ib.target))
+            ))?;
+
+        for method in &ib.methods {
+            // Find the mangled name
+            let mangled = method_mappings
+                .iter()
+                .find(|(name, _)| name == &method.name)
+                .map(|(_, m)| m.clone())
+                .ok_or_else(|| CodegenError::General(
+                    format!("method {} not found in impl block", method.name)
+                ))?;
+
+            let mangled_decl = FnDecl {
+                public: method.public,
+                name: mangled,
+                params: method.params.clone(),
+                return_type: method.return_type.clone(),
+                effects: method.effects.clone(),
+                body: method.body.clone(),
+                span: method.span,
+            };
+            self.compile_function(&mangled_decl)?;
+        }
+        Ok(())
+    }
+
+    /// Try to resolve a method call through the trait system.
+    /// Given a method name and the first argument, find the correct mangled impl function.
+    fn resolve_trait_method(&self, method_name: &str, target_type_hint: Option<&str>) -> Option<FunctionValue<'ctx>> {
+        let trait_name = self.trait_methods.get(method_name)?;
+
+        // If we have a type hint, try direct lookup
+        if let Some(target) = target_type_hint {
+            let key = (trait_name.clone(), target.to_string());
+            if let Some(methods) = self.trait_impls.get(&key) {
+                if let Some((_, mangled)) = methods.iter().find(|(n, _)| n == method_name) {
+                    return self.functions.get(mangled).copied();
+                }
+            }
+        }
+
+        // Otherwise, search all impls for this trait
+        for ((t_name, _target), methods) in &self.trait_impls {
+            if t_name == trait_name {
+                if let Some((_, mangled)) = methods.iter().find(|(n, _)| n == method_name) {
+                    if let Some(func) = self.functions.get(mangled) {
+                        return Some(*func);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Register a type definition so codegen knows about record field layouts and variant tags.
@@ -881,6 +1048,14 @@ impl<'ctx> Codegen<'ctx> {
                     // forwards to the original function ignoring env.
                     let arity = self.function_arities.get(name).copied().unwrap_or(0);
                     self.wrap_function_as_closure(func, arity)
+                } else if self.trait_methods.contains_key(name) {
+                    // Resolve trait method as a value (e.g., passing `show` to map)
+                    if let Some(trait_func) = self.resolve_trait_method(name, None) {
+                        let arity = trait_func.count_params() as usize;
+                        self.wrap_function_as_closure(trait_func, arity)
+                    } else {
+                        Err(CodegenError::UndefinedVar(name.clone()))
+                    }
                 } else {
                     Err(CodegenError::UndefinedVar(name.clone()))
                 }
@@ -1073,6 +1248,35 @@ impl<'ctx> Codegen<'ctx> {
                             .build_call(func, &compiled_args?, "call")
                             .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                         return Ok(result.try_as_basic_value().left());
+                    }
+
+                    // Try trait method dispatch: resolve through impl blocks
+                    if self.trait_methods.contains_key(name) {
+                        if let Some(trait_func) = self.resolve_trait_method(name, None) {
+                            let expected_arity = trait_func.count_params() as usize;
+
+                            if args.len() < expected_arity {
+                                let mut compiled_args = Vec::new();
+                                for a in args {
+                                    let val = self.compile_expr(a, function)?.unwrap();
+                                    compiled_args.push(val);
+                                }
+                                return self.compile_partial_application(trait_func, &compiled_args, expected_arity, function);
+                            }
+
+                            let compiled_args: Result<Vec<BasicMetadataValueEnum>, _> = args
+                                .iter()
+                                .map(|a| {
+                                    self.compile_expr(a, function)
+                                        .map(|v| v.unwrap().into())
+                                })
+                                .collect();
+                            let result = self
+                                .builder
+                                .build_call(trait_func, &compiled_args?, "trait_call")
+                                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            return Ok(result.try_as_basic_value().left());
+                        }
                     }
                 }
 

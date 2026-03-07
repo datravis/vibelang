@@ -513,6 +513,50 @@ impl Parser {
 
     // ---- Trait & Impl ----
 
+    /// Parse a trait method signature (body is optional; defaults to a unit literal placeholder).
+    fn parse_trait_method(&mut self) -> Result<FnDecl, ParseError> {
+        let span = self.expect(&TokenKind::Fn)?;
+        let (name, _) = self.expect_ident()?;
+        let params = self.parse_params()?;
+
+        let return_type = if *self.peek() == TokenKind::Arrow {
+            self.advance();
+            Some(self.parse_type_expr()?)
+        } else {
+            None
+        };
+
+        let effects = if *self.peek() == TokenKind::With {
+            self.advance();
+            let mut effs = vec![self.parse_type_expr()?];
+            while *self.peek() == TokenKind::Comma {
+                self.advance();
+                effs.push(self.parse_type_expr()?);
+            }
+            effs
+        } else {
+            Vec::new()
+        };
+
+        // Body is optional in trait definitions: if `=` present, parse body; otherwise use placeholder
+        let body = if *self.peek() == TokenKind::Eq {
+            self.advance();
+            self.parse_expr()?
+        } else {
+            Expr::UnitLit(span)
+        };
+
+        Ok(FnDecl {
+            public: false,
+            name,
+            params,
+            return_type,
+            effects,
+            body,
+            span,
+        })
+    }
+
     fn parse_trait_def(&mut self) -> Result<TraitDef, ParseError> {
         let span = self.expect(&TokenKind::Trait)?;
         let (name, _) = self.expect_type_ident()?;
@@ -537,7 +581,7 @@ impl Parser {
         self.expect(&TokenKind::LBrace)?;
         let mut methods = Vec::new();
         while *self.peek() != TokenKind::RBrace {
-            methods.push(self.parse_fn_decl(false)?);
+            methods.push(self.parse_trait_method()?);
         }
         self.expect(&TokenKind::RBrace)?;
 
@@ -1383,6 +1427,51 @@ mod tests {
                 other => panic!("expected match, got {other:?}"),
             },
             _ => panic!("expected function"),
+        }
+    }
+
+    #[test]
+    fn test_trait_def() {
+        let m = parse_str("module main\ntrait Show {\n    fn show(x: Int) -> Int\n}");
+        assert_eq!(m.declarations.len(), 1);
+        match &m.declarations[0] {
+            Decl::TraitDef(t) => {
+                assert_eq!(t.name, "Show");
+                assert_eq!(t.methods.len(), 1);
+                assert_eq!(t.methods[0].name, "show");
+                assert_eq!(t.methods[0].params.len(), 1);
+            }
+            _ => panic!("expected trait def"),
+        }
+    }
+
+    #[test]
+    fn test_impl_block() {
+        let m = parse_str(
+            "module main\ntrait Eq {\n    fn eq(a: Int, b: Int) -> Int\n}\nimpl Eq for Int {\n    fn eq(a: Int, b: Int) -> Int = a\n}"
+        );
+        assert_eq!(m.declarations.len(), 2);
+        match &m.declarations[1] {
+            Decl::ImplBlock(ib) => {
+                assert_eq!(ib.trait_name, "Eq");
+                assert_eq!(ib.methods.len(), 1);
+                assert_eq!(ib.methods[0].name, "eq");
+            }
+            _ => panic!("expected impl block"),
+        }
+    }
+
+    #[test]
+    fn test_trait_with_requires() {
+        let m = parse_str(
+            "module main\ntrait Ord requires Eq {\n    fn compare(a: Int, b: Int) -> Int\n}"
+        );
+        match &m.declarations[0] {
+            Decl::TraitDef(t) => {
+                assert_eq!(t.name, "Ord");
+                assert_eq!(t.requires.len(), 1);
+            }
+            _ => panic!("expected trait def"),
         }
     }
 }

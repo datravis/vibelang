@@ -1,0 +1,43 @@
+module main
+
+-- Define a trait for things that can be doubled
+trait Doubler {
+    fn double(x: Int) -> Int
+}
+
+-- Implement Doubler for Int
+impl Doubler for Int {
+    fn double(x: Int) -> Int = x * 2
+}
+
+-- Define a trait for describing values
+trait Describable {
+    fn describe(x: Int) -> Int
+}
+
+impl Describable for Int {
+    fn describe(x: Int) -> Int = do
+        print(x)
+        x
+}
+
+-- Trait with default implementation
+trait Greetable {
+    fn greet(x: Int) -> Int
+}
+
+impl Greetable for Int {
+    fn greet(x: Int) -> Int = do
+        print("Hello, value:")
+        print(x)
+        x + 1
+}
+
+-- Use trait methods in main
+fn main() -> Int = do
+    let result = double(21)
+    print(result)
+    let d = describe(42)
+    let g = greet(99)
+    print(g)
+    0
