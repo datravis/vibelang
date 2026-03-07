@@ -30,6 +30,9 @@ enum Command {
         /// Emit LLVM IR instead of object code
         #[arg(long)]
         emit_ir: bool,
+        /// Optimization level (0=none, 1=basic, 2=default, 3=aggressive)
+        #[arg(short = 'O', long = "opt-level", default_value = "2")]
+        opt_level: u8,
     },
     /// Type-check a VibeLang source file without compiling
     Check {
@@ -40,6 +43,9 @@ enum Command {
     Run {
         /// Source file to run
         file: PathBuf,
+        /// Optimization level (0=none, 1=basic, 2=default, 3=aggressive)
+        #[arg(short = 'O', long = "opt-level", default_value = "2")]
+        opt_level: u8,
     },
     /// Lex a file and print tokens (debug)
     Lex {
@@ -64,9 +70,10 @@ fn main() {
             output,
             target,
             emit_ir,
-        } => run_build(&file, output.as_deref(), &target, emit_ir),
+            opt_level,
+        } => run_build(&file, output.as_deref(), &target, emit_ir, opt_level),
         Command::Check { file } => run_check(&file),
-        Command::Run { file } => run_run(&file),
+        Command::Run { file, opt_level } => run_run(&file, opt_level),
         Command::Lex { file } => run_lex(&file),
         Command::Parse { file } => run_parse(&file),
         Command::Targets => run_targets(),
@@ -109,6 +116,7 @@ fn run_build(
     output: Option<&std::path::Path>,
     target: &str,
     emit_ir: bool,
+    opt_level: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = std::fs::read_to_string(file)?;
     let tokens = lexer::lex(&source)?;
@@ -119,9 +127,9 @@ fn run_build(
     let out_path = output.unwrap_or(&default_output);
 
     if emit_ir {
-        codegen::emit_ir(&module, out_path, target)?;
+        codegen::emit_ir(&module, out_path, target, opt_level)?;
     } else {
-        codegen::emit_object(&module, out_path, target)?;
+        codegen::emit_object(&module, out_path, target, opt_level)?;
     }
 
     println!("Compiled: {}", out_path.display());
@@ -139,11 +147,11 @@ fn run_targets() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_run(file: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+fn run_run(file: &std::path::Path, opt_level: u8) -> Result<(), Box<dyn std::error::Error>> {
     let source = std::fs::read_to_string(file)?;
     let tokens = lexer::lex(&source)?;
     let module = parser::parse(tokens)?;
     types::check(&module)?;
-    codegen::jit_run(&module)?;
+    codegen::jit_run(&module, opt_level)?;
     Ok(())
 }

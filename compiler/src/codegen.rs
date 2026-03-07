@@ -8,6 +8,7 @@ use inkwell::targets::{
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::OptimizationLevel;
+use inkwell::passes::PassBuilderOptions;
 use inkwell::{AddressSpace, IntPredicate, FloatPredicate};
 use std::collections::HashMap;
 use std::path::Path;
@@ -29,10 +30,14 @@ pub fn emit_ir(
     module: &crate::ast::Module,
     output: &Path,
     target: &str,
+    opt_level: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let context = Context::create();
     let mut gen = Codegen::new(&context, &module.name.join("."), target)?;
     gen.compile_module(module)?;
+    if opt_level > 0 {
+        gen.run_optimization_passes(opt_level)?;
+    }
     gen.llvm_module.print_to_file(output).map_err(|e| {
         CodegenError::Llvm(e.to_string())
     })?;
@@ -43,10 +48,14 @@ pub fn emit_object(
     module: &crate::ast::Module,
     output: &Path,
     target: &str,
+    opt_level: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let context = Context::create();
     let mut gen = Codegen::new(&context, &module.name.join("."), target)?;
     gen.compile_module(module)?;
+    if opt_level > 0 {
+        gen.run_optimization_passes(opt_level)?;
+    }
 
     let target_machine = gen.create_target_machine()?;
     target_machine
@@ -56,10 +65,13 @@ pub fn emit_object(
     Ok(())
 }
 
-pub fn jit_run(module: &crate::ast::Module) -> Result<(), Box<dyn std::error::Error>> {
+pub fn jit_run(module: &crate::ast::Module, opt_level: u8) -> Result<(), Box<dyn std::error::Error>> {
     let context = Context::create();
     let mut gen = Codegen::new(&context, &module.name.join("."), "native")?;
     gen.compile_module(module)?;
+    if opt_level > 0 {
+        gen.run_optimization_passes(opt_level)?;
+    }
 
     let engine = gen
         .llvm_module
@@ -156,6 +168,25 @@ impl<'ctx> Codegen<'ctx> {
                 CodeModel::Default,
             )
             .ok_or_else(|| CodegenError::Llvm("failed to create target machine".into()))
+    }
+
+    fn run_optimization_passes(&self, opt_level: u8) -> Result<(), CodegenError> {
+        let target_machine = self.create_target_machine()?;
+        let passes = match opt_level {
+            1 => "default<O1>",
+            2 => "default<O2>",
+            _ => "default<O3>",
+        };
+        let options = PassBuilderOptions::create();
+        options.set_loop_vectorization(opt_level >= 2);
+        options.set_loop_slp_vectorization(opt_level >= 2);
+        options.set_loop_unrolling(opt_level >= 2);
+        options.set_loop_interleaving(opt_level >= 2);
+        options.set_merge_functions(opt_level >= 2);
+
+        self.llvm_module
+            .run_passes(passes, &target_machine, options)
+            .map_err(|e| CodegenError::Llvm(e.to_string()))
     }
 
     fn push_scope(&mut self) {
