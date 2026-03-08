@@ -2823,10 +2823,11 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.build_return(None).unwrap();
         }
 
-        // vibe_handler_perform(effect_hash: i64, op_hash: i64, arg: i64) -> i64
+        // vibe_handler_perform(effect_hash: i64, op_hash: i64, arg: ptr) -> i64
         // Searches the handler stack from top down, calls matching handler
+        // arg is ptr to preserve pointer types (strings, etc.) through the handler
         let perform_ty = i64_ty.fn_type(
-            &[i64_ty.into(), i64_ty.into(), i64_ty.into()],
+            &[i64_ty.into(), i64_ty.into(), ptr_ty.into()],
             false,
         );
         let perform_fn = self.llvm_module.add_function("vibe_handler_perform", perform_ty, None);
@@ -2841,7 +2842,7 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.position_at_end(entry);
             let eff_hash = perform_fn.get_nth_param(0).unwrap().into_int_value();
             let o_hash = perform_fn.get_nth_param(1).unwrap().into_int_value();
-            let arg = perform_fn.get_nth_param(2).unwrap().into_int_value();
+            let arg = perform_fn.get_nth_param(2).unwrap().into_pointer_value();
 
             let top_ptr = self.handler_top_global.unwrap();
             let top = self.builder.build_load(i64_ty, top_ptr, "top").unwrap().into_int_value();
@@ -2903,7 +2904,7 @@ impl<'ctx> Codegen<'ctx> {
             ).unwrap().into_pointer_value();
 
             // Call handler(arg, user_data) -> i64
-            let handler_fn_ty = i64_ty.fn_type(&[i64_ty.into(), ptr_ty.into()], false);
+            let handler_fn_ty = i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
             let result = self.builder.build_indirect_call(
                 handler_fn_ty, handler_fn_ptr, &[arg.into(), user_data_val.into()], "result",
             ).unwrap();
@@ -2943,7 +2944,8 @@ impl<'ctx> Codegen<'ctx> {
             let op_hash = Self::hash_name(&handler.operation);
 
             // Compile handler body as lambda
-            let handler_fn_ty = i64_ty.fn_type(&[i64_ty.into(), ptr_ty.into()], false);
+            // Handler receives (arg: ptr, user_data: ptr) -> i64
+            let handler_fn_ty = i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
             let handler_fn_name = format!("handler_{}_{}", handler.effect_name, handler.operation);
             let handler_fn = self.llvm_module.add_function(&handler_fn_name, handler_fn_ty, None);
 
@@ -3015,12 +3017,24 @@ impl<'ctx> Codegen<'ctx> {
         let effect_hash = Self::hash_name(effect_name);
         let op_hash = Self::hash_name(op_name);
 
-        // Compile the first argument (or 0 if no args)
-        let arg_val = if let Some(first_arg) = args.first() {
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        // Compile the first argument, preserving pointer types for strings
+        let arg_ptr = if let Some(first_arg) = args.first() {
             let val = self.compile_expr(first_arg, function)?.unwrap();
-            self.ensure_i64(val)
+            if val.is_pointer_value() {
+                // Strings and other pointer values pass through directly
+                val.into_pointer_value()
+            } else {
+                // Convert integers to pointer-sized representation
+                self.builder.build_int_to_ptr(
+                    self.ensure_i64(val).into_int_value(),
+                    ptr_ty,
+                    "arg_as_ptr",
+                ).map_err(|e| CodegenError::Llvm(e.to_string()))?
+            }
         } else {
-            i64_ty.const_int(0, false).into()
+            ptr_ty.const_null()
         };
 
         let result = self.builder.build_call(
@@ -3028,7 +3042,7 @@ impl<'ctx> Codegen<'ctx> {
             &[
                 i64_ty.const_int(effect_hash, false).into(),
                 i64_ty.const_int(op_hash, false).into(),
-                arg_val.into(),
+                arg_ptr.into(),
             ],
             "perform_result",
         ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
