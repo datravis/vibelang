@@ -66,7 +66,65 @@ pub fn emit_object(
     Ok(())
 }
 
+/// Find the runtime shared library path relative to the compiler binary or in known locations.
+fn find_runtime_lib() -> Option<std::path::PathBuf> {
+    // Try relative to the compiler binary
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // Check sibling to compiler binary: ../../runtime/libvibe_runtime.so
+            let candidates = [
+                dir.join("libvibe_runtime.so"),
+                dir.join("../libvibe_runtime.so"),
+                dir.join("../../runtime/libvibe_runtime.so"),
+            ];
+            for p in &candidates {
+                if p.exists() {
+                    return Some(p.clone());
+                }
+            }
+        }
+    }
+    // Check well-known paths
+    let known = [
+        Path::new("runtime/libvibe_runtime.so"),
+        Path::new("../runtime/libvibe_runtime.so"),
+        Path::new("/usr/local/lib/libvibe_runtime.so"),
+    ];
+    for p in &known {
+        if p.exists() {
+            return Some(p.to_path_buf());
+        }
+    }
+    None
+}
+
 pub fn jit_run(module: &crate::ast::Module, opt_level: u8) -> Result<(), Box<dyn std::error::Error>> {
+    // Load the concurrency runtime shared library so JIT can resolve symbols
+    let _runtime_lib = if let Some(lib_path) = find_runtime_lib() {
+        unsafe {
+            // RTLD_NOW | RTLD_GLOBAL so symbols are available to JIT
+            let path_cstr = std::ffi::CString::new(
+                lib_path.to_str().unwrap_or("libvibe_runtime.so")
+            )?;
+            let handle = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+            if handle.is_null() {
+                eprintln!("warning: could not load runtime library: {:?}", lib_path);
+            }
+            handle
+        }
+    } else {
+        // Try loading from system path
+        unsafe {
+            let name = std::ffi::CString::new("libvibe_runtime.so")?;
+            let handle = libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+            if handle.is_null() {
+                // Runtime not found — par/pmap will fail at link time, but simple programs work
+                eprintln!("warning: concurrency runtime not found; par/pmap will not work");
+            }
+            handle
+        }
+    };
+
     let context = Context::create();
     let mut gen = Codegen::new(&context, &module.name.join("."), "native")?;
     gen.compile_module(module)?;
@@ -917,6 +975,16 @@ impl<'ctx> Codegen<'ctx> {
         // Set up a region for this function scope
         let region_ptr = self.create_region(function)?;
 
+        // For main(), initialize the concurrency runtime
+        let is_main = decl.name == "main";
+        if is_main {
+            if let Some(init_fn) = self.functions.get("vibe_runtime_init").copied() {
+                let zero = self.context.i32_type().const_int(0, false);
+                self.builder.build_call(init_fn, &[zero.into()], "")
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            }
+        }
+
         if is_tail_recursive {
             // TCO: allocate stack slots for params, create loop header
             let mut allocs = Vec::new();
@@ -960,6 +1028,12 @@ impl<'ctx> Codegen<'ctx> {
             self.tco_fn_name = None;
 
             // Return (only reached for non-tail-call branches)
+            if is_main {
+                if let Some(shutdown_fn) = self.functions.get("vibe_runtime_shutdown").copied() {
+                    self.builder.build_call(shutdown_fn, &[], "")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                }
+            }
             self.destroy_region(region_ptr)?;
             match result {
                 Some(val) => {
@@ -982,6 +1056,12 @@ impl<'ctx> Codegen<'ctx> {
 
             let result = self.compile_expr(&decl.body, function)?;
 
+            if is_main {
+                if let Some(shutdown_fn) = self.functions.get("vibe_runtime_shutdown").copied() {
+                    self.builder.build_call(shutdown_fn, &[], "")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                }
+            }
             self.destroy_region(region_ptr)?;
             match result {
                 Some(val) => {
@@ -2966,7 +3046,48 @@ impl<'ctx> Codegen<'ctx> {
         let i64_ty = self.context.i64_type();
         let i32_ty = self.context.i32_type();
         let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let void_ty = self.context.void_type();
 
+        // vibe_runtime_init(num_threads: i32) -> void
+        let init_ty = void_ty.fn_type(&[i32_ty.into()], false);
+        let init_fn = self.llvm_module.add_function("vibe_runtime_init", init_ty, None);
+        self.functions.insert("vibe_runtime_init".into(), init_fn);
+
+        // vibe_runtime_shutdown() -> void
+        let shutdown_ty = void_ty.fn_type(&[], false);
+        let shutdown_fn = self.llvm_module.add_function("vibe_runtime_shutdown", shutdown_ty, None);
+        self.functions.insert("vibe_runtime_shutdown".into(), shutdown_fn);
+
+        // vibe_par_execute(thunks: ptr, out_results: ptr, n: i32) -> void
+        let par_exec_ty = void_ty.fn_type(
+            &[ptr_ty.into(), ptr_ty.into(), i32_ty.into()],
+            false,
+        );
+        let par_exec = self.llvm_module.add_function("vibe_par_execute", par_exec_ty, None);
+        self.functions.insert("vibe_par_execute".into(), par_exec);
+
+        // vibe_pmap_list(list: ptr, fn: ptr, region: ptr) -> ptr
+        let pmap_ty = ptr_ty.fn_type(
+            &[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        let pmap_fn = self.llvm_module.add_function("vibe_pmap_list", pmap_ty, None);
+        self.functions.insert("vibe_pmap_list".into(), pmap_fn);
+
+        // vibe_race_execute(thunks: ptr, n: i32) -> i64
+        let race_ty = i64_ty.fn_type(
+            &[ptr_ty.into(), i32_ty.into()],
+            false,
+        );
+        let race_fn = self.llvm_module.add_function("vibe_race_execute", race_ty, None);
+        self.functions.insert("vibe_race_execute".into(), race_fn);
+
+        // vibe_list_count(list: ptr) -> i64
+        let count_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+        let count_fn = self.llvm_module.add_function("vibe_list_count", count_ty, None);
+        self.functions.insert("vibe_list_count".into(), count_fn);
+
+        // Keep pthread declarations for the thread entry wrapper used by thunks
         // pthread_create(thread: ptr, attr: ptr, start_routine: ptr, arg: ptr) -> i32
         let pthread_create_ty = i32_ty.fn_type(
             &[ptr_ty.into(), ptr_ty.into(), ptr_ty.into(), ptr_ty.into()],
@@ -2983,9 +3104,9 @@ impl<'ctx> Codegen<'ctx> {
         let pthread_join = self.llvm_module.add_function("pthread_join", pthread_join_ty, None);
         self.functions.insert("pthread_join".into(), pthread_join);
 
-        // Thread wrapper: struct { fn_ptr: ptr, result: i64 }
-        // vibe_thread_entry(arg: ptr) -> ptr
-        // Calls the function pointer stored in arg, stores result
+        // Thread wrapper: vibe_thread_entry(arg: ptr) -> ptr
+        // Still needed for thunks in par() — the thunk functions are compiled
+        // into the module and their pointers are passed to vibe_par_execute
         let thread_entry_ty = ptr_ty.fn_type(&[ptr_ty.into()], false);
         let thread_entry = self.llvm_module.add_function("vibe_thread_entry", thread_entry_ty, None);
         self.functions.insert("vibe_thread_entry".into(), thread_entry);
@@ -2996,23 +3117,19 @@ impl<'ctx> Codegen<'ctx> {
 
             let arg_ptr = thread_entry.get_nth_param(0).unwrap().into_pointer_value();
 
-            // struct layout: { fn_ptr: ptr, result: i64 }
             let task_struct_ty = self.context.struct_type(
                 &[ptr_ty.into(), i64_ty.into()],
                 false,
             );
 
-            // Load fn_ptr
             let fn_ptr_ptr = self.builder.build_struct_gep(task_struct_ty, arg_ptr, 0, "fn_ptr_ptr").unwrap();
             let fn_ptr = self.builder.build_load(ptr_ty, fn_ptr_ptr, "fn_ptr").unwrap().into_pointer_value();
 
-            // Call the thunk: fn() -> i64
             let thunk_ty = i64_ty.fn_type(&[], false);
             let result = self.builder.build_indirect_call(thunk_ty, fn_ptr, &[], "thunk_result").unwrap();
             let result_val = result.try_as_basic_value().left()
                 .unwrap_or_else(|| i64_ty.const_int(0, false).into());
 
-            // Store result
             let result_ptr = self.builder.build_struct_gep(task_struct_ty, arg_ptr, 1, "result_ptr").unwrap();
             self.builder.build_store(result_ptr, result_val).unwrap();
 
@@ -3020,28 +3137,23 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
-    /// Compile par(expr1, expr2, ...) — parallel evaluation of expressions
+    /// Compile par(expr1, expr2, ...) — parallel evaluation via work-stealing pool
     fn compile_par(
         &mut self,
         exprs: &[Expr],
         function: FunctionValue<'ctx>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
         let i64_ty = self.context.i64_type();
+        let i32_ty = self.context.i32_type();
         let ptr_ty = self.context.ptr_type(AddressSpace::default());
 
-        let task_struct_ty = self.context.struct_type(
-            &[ptr_ty.into(), i64_ty.into()],
-            false,
-        );
-        let task_struct_size = i64_ty.const_int(16, false); // ptr(8) + i64(8)
-
+        let par_execute_fn = self.functions["vibe_par_execute"];
         let malloc_fn = self.functions["malloc"];
         let free_fn = self.functions["free"];
-        let pthread_create_fn = self.functions["pthread_create"];
-        let pthread_join_fn = self.functions["pthread_join"];
-        let thread_entry_fn = self.functions["vibe_thread_entry"];
 
-        // For each expression, compile it as a thunk (no-arg lambda)
+        let n = exprs.len();
+
+        // For each expression, compile it as a thunk (no-arg function returning i64)
         let mut thunk_fns = Vec::new();
         for (i, expr) in exprs.iter().enumerate() {
             let thunk_ty = i64_ty.fn_type(&[], false);
@@ -3066,70 +3178,57 @@ impl<'ctx> Codegen<'ctx> {
             thunk_fns.push(thunk_fn);
         }
 
-        // Allocate task structs and thread handles
-        let mut task_ptrs = Vec::new();
-        let mut thread_allocs = Vec::new();
+        // Allocate arrays for thunk pointers and results
+        let arr_size = i64_ty.const_int((n * 8) as u64, false);
 
+        let thunks_arr = self.builder.build_call(malloc_fn, &[arr_size.into()], "thunks_arr")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?
+            .try_as_basic_value().left().unwrap().into_pointer_value();
+
+        let results_arr = self.builder.build_call(malloc_fn, &[arr_size.into()], "results_arr")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?
+            .try_as_basic_value().left().unwrap().into_pointer_value();
+
+        // Store thunk function pointers into the array
         for (i, thunk_fn) in thunk_fns.iter().enumerate() {
-            // Allocate task struct
-            let task_ptr = self.builder.build_call(malloc_fn, &[task_struct_size.into()], &format!("task_{i}"))
-                .map_err(|e| CodegenError::Llvm(e.to_string()))?
-                .try_as_basic_value().left().unwrap().into_pointer_value();
-
-            // Store fn_ptr
-            let fn_ptr_field = self.builder.build_struct_gep(task_struct_ty, task_ptr, 0, "fn_field")
+            let idx = i64_ty.const_int(i as u64, false);
+            let slot = unsafe {
+                self.builder.build_in_bounds_gep(ptr_ty, thunks_arr, &[idx], &format!("thunk_slot_{i}"))
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?
+            };
+            self.builder.build_store(slot, thunk_fn.as_global_value().as_pointer_value())
                 .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-            self.builder.build_store(fn_ptr_field, thunk_fn.as_global_value().as_pointer_value())
-                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-
-            // Initialize result to 0
-            let res_field = self.builder.build_struct_gep(task_struct_ty, task_ptr, 1, "res_field")
-                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-            self.builder.build_store(res_field, i64_ty.const_int(0, false))
-                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-
-            // Allocate thread handle (pthread_t is i64 on most platforms)
-            let thread_alloc = self.builder.build_alloca(i64_ty, &format!("thread_{i}"))
-                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-
-            // pthread_create(&thread, NULL, thread_entry, task_ptr)
-            self.builder.build_call(
-                pthread_create_fn,
-                &[
-                    thread_alloc.into(),
-                    ptr_ty.const_null().into(),
-                    thread_entry_fn.as_global_value().as_pointer_value().into(),
-                    task_ptr.into(),
-                ],
-                &format!("create_{i}"),
-            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
-
-            task_ptrs.push(task_ptr);
-            thread_allocs.push(thread_alloc);
         }
 
-        // Join all threads and collect results
+        // Call vibe_par_execute(thunks_arr, results_arr, n)
+        self.builder.build_call(
+            par_execute_fn,
+            &[
+                thunks_arr.into(),
+                results_arr.into(),
+                i32_ty.const_int(n as u64, false).into(),
+            ],
+            "",
+        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        // Read results from the results array
         let mut results = Vec::new();
-        for (i, (task_ptr, thread_alloc)) in task_ptrs.iter().zip(thread_allocs.iter()).enumerate() {
-            let thread_handle = self.builder.build_load(i64_ty, *thread_alloc, &format!("th_{i}"))
+        for i in 0..n {
+            let idx = i64_ty.const_int(i as u64, false);
+            let slot = unsafe {
+                self.builder.build_in_bounds_gep(i64_ty, results_arr, &[idx], &format!("res_slot_{i}"))
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?
+            };
+            let val = self.builder.build_load(i64_ty, slot, &format!("par_res_{i}"))
                 .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-            self.builder.build_call(
-                pthread_join_fn,
-                &[thread_handle.into(), ptr_ty.const_null().into()],
-                &format!("join_{i}"),
-            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
-
-            // Read result from task struct
-            let res_field = self.builder.build_struct_gep(task_struct_ty, *task_ptr, 1, &format!("res_{i}"))
-                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-            let result_val = self.builder.build_load(i64_ty, res_field, &format!("result_{i}"))
-                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-            results.push(result_val);
-
-            // Free task struct
-            self.builder.build_call(free_fn, &[(*task_ptr).into()], "")
-                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            results.push(val);
         }
+
+        // Free temporary arrays
+        self.builder.build_call(free_fn, &[thunks_arr.into()], "")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        self.builder.build_call(free_fn, &[results_arr.into()], "")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
 
         // Pack results into a tuple
         if results.len() == 1 {
@@ -3158,42 +3257,36 @@ impl<'ctx> Codegen<'ctx> {
         func: &Expr,
         function: FunctionValue<'ctx>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
-        let i64_ty = self.context.i64_type();
         let ptr_ty = self.context.ptr_type(AddressSpace::default());
 
-        // For v0.1, implement pmap as sequential map with threading infrastructure
-        // Compile collection and function
         let col_val = self.compile_expr(collection, function)?.unwrap();
         let func_val = self.compile_expr(func, function)?.unwrap();
 
-        // Use the vibe_list_map runtime function
-        if let Some(map_fn) = self.functions.get("vibe_list_map").copied() {
-            let func_ptr = if func_val.is_pointer_value() {
-                func_val.into_pointer_value()
-            } else {
-                return Err(CodegenError::Unsupported("pmap requires a function".into()));
-            };
+        // Use vibe_pmap_list from the concurrency runtime
+        let pmap_fn = self.functions["vibe_pmap_list"];
 
-            let col_ptr = if col_val.is_pointer_value() {
-                col_val.into_pointer_value()
-            } else {
-                return Ok(Some(col_val));
-            };
-
-            let region_ptr = self.region_stack.last().copied().flatten()
-                .unwrap_or(ptr_ty.const_null());
-
-            let result = self.builder.build_call(
-                map_fn,
-                &[col_ptr.into(), func_ptr.into(), region_ptr.into()],
-                "pmap_result",
-            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
-
-            Ok(result.try_as_basic_value().left())
+        let func_ptr = if func_val.is_pointer_value() {
+            func_val.into_pointer_value()
         } else {
-            // Fallback: just return the collection
-            Ok(Some(col_val))
-        }
+            return Err(CodegenError::Unsupported("pmap requires a function".into()));
+        };
+
+        let col_ptr = if col_val.is_pointer_value() {
+            col_val.into_pointer_value()
+        } else {
+            return Ok(Some(col_val));
+        };
+
+        let region_ptr = self.region_stack.last().copied().flatten()
+            .unwrap_or(ptr_ty.const_null());
+
+        let result = self.builder.build_call(
+            pmap_fn,
+            &[col_ptr.into(), func_ptr.into(), region_ptr.into()],
+            "pmap_result",
+        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        Ok(result.try_as_basic_value().left())
     }
 
     // ============================================================

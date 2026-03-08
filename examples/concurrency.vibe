@@ -12,12 +12,25 @@ fn compute_c() -> Int = do
     let z = 300 * 300
     z + 1
 
+-- Recursive fib to demonstrate real parallel work
+fn fib(n: Int) -> Int =
+    if n <= 1 then n
+    else fib(n - 1) + fib(n - 2)
+
 -- Use par to evaluate three computations in parallel
 fn main() -> Int = do
+    -- Simple par: three independent computations
     let results = par(
         fn() = compute_a(),
         fn() = compute_b(),
         fn() = compute_c(),
     )
     print("Parallel computation complete!")
+
+    -- Heavy par: fibonacci computed on multiple cores simultaneously
+    let heavy = par(
+        fn() = fib(30),
+        fn() = fib(31),
+    )
+    print("Heavy parallel work done!")
     0
