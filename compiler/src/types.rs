@@ -123,6 +123,34 @@ impl TypeChecker {
             Type::Fn(vec![Type::Unknown], Box::new(Type::Unknown)),
         );
 
+        // List operations (used with pipe operator: list |> map(f) |> filter(p) |> fold(init, f))
+        let list_t = Type::List(Box::new(Type::Unknown));
+        let fn_t = Type::Fn(vec![Type::Unknown], Box::new(Type::Unknown));
+        env.insert(
+            "map".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(list_t.clone())),
+        );
+        env.insert(
+            "filter".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(list_t.clone())),
+        );
+        env.insert(
+            "fold".into(),
+            Type::Fn(vec![Type::Unknown, fn_t.clone()], Box::new(Type::Unknown)),
+        );
+        env.insert(
+            "for_each".into(),
+            Type::Fn(vec![fn_t], Box::new(Type::Unit)),
+        );
+        env.insert(
+            "count".into(),
+            Type::Fn(vec![list_t.clone()], Box::new(Type::Int)),
+        );
+        env.insert(
+            "length".into(),
+            Type::Fn(vec![list_t], Box::new(Type::Int)),
+        );
+
         Self {
             env: vec![env],
             type_defs: HashMap::new(),

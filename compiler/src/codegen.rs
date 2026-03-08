@@ -1037,7 +1037,8 @@ impl<'ctx> Codegen<'ctx> {
             self.destroy_region(region_ptr)?;
             match result {
                 Some(val) => {
-                    self.builder.build_return(Some(&val))
+                    let ret_val = self.coerce_return(val, function);
+                    self.builder.build_return(Some(&ret_val))
                         .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 }
                 None => {
@@ -1065,7 +1066,8 @@ impl<'ctx> Codegen<'ctx> {
             self.destroy_region(region_ptr)?;
             match result {
                 Some(val) => {
-                    self.builder.build_return(Some(&val))
+                    let ret_val = self.coerce_return(val, function);
+                    self.builder.build_return(Some(&ret_val))
                         .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 }
                 None => {
@@ -1616,24 +1618,24 @@ impl<'ctx> Codegen<'ctx> {
 
                             match name.as_str() {
                                 "map" if !args.is_empty() && input_val.is_pointer_value() => {
-                                    let func_val = self.compile_expr(&args[0], function)?.unwrap();
-                                    if func_val.is_pointer_value() {
+                                    let func_ptr = self.resolve_raw_fn_ptr(&args[0], function)?;
+                                    if let Some(fp) = func_ptr {
                                         let map_fn = self.functions["vibe_list_map"];
                                         let result = self.builder.build_call(
                                             map_fn,
-                                            &[input_val.into(), func_val.into(), region_ptr.into()],
+                                            &[input_val.into(), fp.into(), region_ptr.into()],
                                             "pipe_map",
                                         ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
                                         return Ok(result.try_as_basic_value().left());
                                     }
                                 }
                                 "filter" if !args.is_empty() && input_val.is_pointer_value() => {
-                                    let func_val = self.compile_expr(&args[0], function)?.unwrap();
-                                    if func_val.is_pointer_value() {
+                                    let func_ptr = self.resolve_raw_fn_ptr(&args[0], function)?;
+                                    if let Some(fp) = func_ptr {
                                         let filter_fn = self.functions["vibe_list_filter"];
                                         let result = self.builder.build_call(
                                             filter_fn,
-                                            &[input_val.into(), func_val.into(), region_ptr.into()],
+                                            &[input_val.into(), fp.into(), region_ptr.into()],
                                             "pipe_filter",
                                         ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
                                         return Ok(result.try_as_basic_value().left());
@@ -1641,23 +1643,25 @@ impl<'ctx> Codegen<'ctx> {
                                 }
                                 "fold" if args.len() >= 2 && input_val.is_pointer_value() => {
                                     let init_val = self.compile_expr(&args[0], function)?.unwrap();
-                                    let func_val = self.compile_expr(&args[1], function)?.unwrap();
-                                    let fold_fn = self.functions["vibe_list_fold"];
-                                    let init_i64 = self.ensure_i64(init_val);
-                                    let result = self.builder.build_call(
-                                        fold_fn,
-                                        &[input_val.into(), init_i64.into(), func_val.into()],
-                                        "pipe_fold",
-                                    ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                                    return Ok(result.try_as_basic_value().left());
+                                    let func_ptr = self.resolve_raw_fn_ptr(&args[1], function)?;
+                                    if let Some(fp) = func_ptr {
+                                        let fold_fn = self.functions["vibe_list_fold"];
+                                        let init_i64 = self.ensure_i64(init_val);
+                                        let result = self.builder.build_call(
+                                            fold_fn,
+                                            &[input_val.into(), init_i64.into(), fp.into()],
+                                            "pipe_fold",
+                                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                        return Ok(result.try_as_basic_value().left());
+                                    }
                                 }
                                 "for_each" if !args.is_empty() && input_val.is_pointer_value() => {
-                                    let func_val = self.compile_expr(&args[0], function)?.unwrap();
-                                    if func_val.is_pointer_value() {
+                                    let func_ptr = self.resolve_raw_fn_ptr(&args[0], function)?;
+                                    if let Some(fp) = func_ptr {
                                         let foreach_fn = self.functions["vibe_list_for_each"];
                                         self.builder.build_call(
                                             foreach_fn,
-                                            &[input_val.into(), func_val.into()],
+                                            &[input_val.into(), fp.into()],
                                             "",
                                         ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
                                         let i64_ty = self.context.i64_type();
@@ -3697,56 +3701,60 @@ impl<'ctx> Codegen<'ctx> {
         for stage in stages {
             match stage {
                 PipelineStage::Map(func_expr) => {
-                    let func_val = self.compile_expr(func_expr, function)?.unwrap();
-                    if current.is_pointer_value() && func_val.is_pointer_value() {
-                        let map_fn = self.functions["vibe_list_map"];
-                        let result = self.builder.build_call(
-                            map_fn,
-                            &[current.into(), func_val.into(), region_ptr.into()],
-                            "mapped",
-                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                        current = result.try_as_basic_value().left()
-                            .unwrap_or_else(|| ptr_ty.const_null().into());
+                    if let Some(func_ptr) = self.resolve_raw_fn_ptr(func_expr, function)? {
+                        if current.is_pointer_value() {
+                            let map_fn = self.functions["vibe_list_map"];
+                            let result = self.builder.build_call(
+                                map_fn,
+                                &[current.into(), func_ptr.into(), region_ptr.into()],
+                                "mapped",
+                            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            current = result.try_as_basic_value().left()
+                                .unwrap_or_else(|| ptr_ty.const_null().into());
+                        }
                     }
                 }
                 PipelineStage::Filter(pred_expr) => {
-                    let pred_val = self.compile_expr(pred_expr, function)?.unwrap();
-                    if current.is_pointer_value() && pred_val.is_pointer_value() {
-                        let filter_fn = self.functions["vibe_list_filter"];
-                        let result = self.builder.build_call(
-                            filter_fn,
-                            &[current.into(), pred_val.into(), region_ptr.into()],
-                            "filtered",
-                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                        current = result.try_as_basic_value().left()
-                            .unwrap_or_else(|| ptr_ty.const_null().into());
+                    if let Some(func_ptr) = self.resolve_raw_fn_ptr(pred_expr, function)? {
+                        if current.is_pointer_value() {
+                            let filter_fn = self.functions["vibe_list_filter"];
+                            let result = self.builder.build_call(
+                                filter_fn,
+                                &[current.into(), func_ptr.into(), region_ptr.into()],
+                                "filtered",
+                            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            current = result.try_as_basic_value().left()
+                                .unwrap_or_else(|| ptr_ty.const_null().into());
+                        }
                     }
                 }
                 PipelineStage::Fold(init_expr, func_expr) => {
                     let init_val = self.compile_expr(init_expr, function)?.unwrap();
-                    let func_val = self.compile_expr(func_expr, function)?.unwrap();
-                    if current.is_pointer_value() {
-                        let fold_fn = self.functions["vibe_list_fold"];
-                        let init_i64 = self.ensure_i64(init_val);
-                        let result = self.builder.build_call(
-                            fold_fn,
-                            &[current.into(), init_i64.into(), func_val.into()],
-                            "folded",
-                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                        current = result.try_as_basic_value().left()
-                            .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+                    if let Some(func_ptr) = self.resolve_raw_fn_ptr(func_expr, function)? {
+                        if current.is_pointer_value() {
+                            let fold_fn = self.functions["vibe_list_fold"];
+                            let init_i64 = self.ensure_i64(init_val);
+                            let result = self.builder.build_call(
+                                fold_fn,
+                                &[current.into(), init_i64.into(), func_ptr.into()],
+                                "folded",
+                            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            current = result.try_as_basic_value().left()
+                                .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+                        }
                     }
                 }
                 PipelineStage::ForEach(func_expr) => {
-                    let func_val = self.compile_expr(func_expr, function)?.unwrap();
-                    if current.is_pointer_value() && func_val.is_pointer_value() {
-                        let foreach_fn = self.functions["vibe_list_for_each"];
-                        self.builder.build_call(
-                            foreach_fn,
-                            &[current.into(), func_val.into()],
-                            "",
-                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                        current = i64_ty.const_int(0, false).into();
+                    if let Some(func_ptr) = self.resolve_raw_fn_ptr(func_expr, function)? {
+                        if current.is_pointer_value() {
+                            let foreach_fn = self.functions["vibe_list_for_each"];
+                            self.builder.build_call(
+                                foreach_fn,
+                                &[current.into(), func_ptr.into()],
+                                "",
+                            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            current = i64_ty.const_int(0, false).into();
+                        }
                     }
                 }
                 PipelineStage::Collect | PipelineStage::Distinct => {
@@ -3903,6 +3911,28 @@ impl<'ctx> Codegen<'ctx> {
         Ok(self.ensure_i64(val))
     }
 
+    /// Coerce a return value to match the function's declared return type.
+    /// Handles i1→i64 widening when a bool result is returned from an i64 function.
+    fn coerce_return(&self, val: BasicValueEnum<'ctx>, function: FunctionValue<'ctx>) -> BasicValueEnum<'ctx> {
+        let ret_ty = function.get_type().get_return_type();
+        match ret_ty {
+            Some(ty) if ty.is_int_type() => {
+                let expected_width = ty.into_int_type().get_bit_width();
+                if val.is_int_value() {
+                    let actual_width = val.into_int_value().get_type().get_bit_width();
+                    if actual_width < expected_width {
+                        return self.builder
+                            .build_int_z_extend(val.into_int_value(), ty.into_int_type(), "ret_zext")
+                            .unwrap()
+                            .into();
+                    }
+                }
+                val
+            }
+            _ => val,
+        }
+    }
+
     fn ensure_i64(&self, val: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
         if val.is_int_value() {
             let iv = val.into_int_value();
@@ -3921,6 +3951,98 @@ impl<'ctx> Codegen<'ctx> {
                 .into()
         } else {
             val
+        }
+    }
+
+    /// Resolve an expression to a raw function pointer suitable for passing to
+    /// runtime functions like vibe_list_map, vibe_list_filter, vibe_list_fold.
+    /// These expect a raw fn(i64)->i64 pointer, NOT a closure struct.
+    fn resolve_raw_fn_ptr(
+        &mut self,
+        expr: &Expr,
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<PointerValue<'ctx>>, CodegenError> {
+        match expr {
+            // Named function: return its direct function pointer
+            Expr::Ident(name, _) => {
+                if let Some(func) = self.functions.get(name).copied() {
+                    Ok(Some(func.as_global_value().as_pointer_value()))
+                } else {
+                    // Variable holding a closure — extract fn_ptr from closure struct
+                    if let Some(val) = self.get_var(name) {
+                        if val.is_pointer_value() {
+                            let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                            let closure_struct_ty = self.context.struct_type(
+                                &[ptr_ty.into(), ptr_ty.into()],
+                                false,
+                            );
+                            let fn_ptr_ptr = self.builder.build_struct_gep(
+                                closure_struct_ty, val.into_pointer_value(), 0, "closure_fn_ptr",
+                            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            let fn_ptr = self.builder.build_load(ptr_ty, fn_ptr_ptr, "raw_fn")
+                                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            return Ok(Some(fn_ptr.into_pointer_value()));
+                        }
+                    }
+                    Err(CodegenError::UndefinedVar(name.clone()))
+                }
+            }
+            // Lambda: compile as a standalone function and return its pointer
+            Expr::Lambda(params, body, _) => {
+                let i64_ty = self.context.i64_type();
+                // Create wrapper function with the right signature
+                let n_params = params.len();
+                let param_types: Vec<BasicMetadataTypeEnum> =
+                    (0..n_params).map(|_| i64_ty.into()).collect();
+                let wrapper_ty = i64_ty.fn_type(&param_types, false);
+                let wrapper_name = format!("__pipeline_fn_{}", self.lambda_counter);
+                self.lambda_counter += 1;
+                let wrapper_fn = self.llvm_module.add_function(&wrapper_name, wrapper_ty, None);
+
+                let prev_bb = self.builder.get_insert_block();
+
+                let entry = self.context.append_basic_block(wrapper_fn, "entry");
+                self.builder.position_at_end(entry);
+
+                self.push_scope();
+                for (i, param) in params.iter().enumerate() {
+                    let val = wrapper_fn.get_nth_param(i as u32).unwrap();
+                    val.set_name(&param.name);
+                    self.set_var(param.name.clone(), val);
+                }
+
+                let result = self.compile_expr(body, wrapper_fn)?;
+                let ret_val = result.unwrap_or_else(|| i64_ty.const_int(0, false).into());
+                let ret_val = self.ensure_i64(ret_val);
+                self.builder.build_return(Some(&ret_val))
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                self.pop_scope();
+
+                if let Some(bb) = prev_bb {
+                    self.builder.position_at_end(bb);
+                }
+
+                Ok(Some(wrapper_fn.as_global_value().as_pointer_value()))
+            }
+            // Fallback: compile and extract from closure struct
+            _ => {
+                let val = self.compile_expr(expr, function)?.unwrap();
+                if val.is_pointer_value() {
+                    let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                    let closure_struct_ty = self.context.struct_type(
+                        &[ptr_ty.into(), ptr_ty.into()],
+                        false,
+                    );
+                    let fn_ptr_ptr = self.builder.build_struct_gep(
+                        closure_struct_ty, val.into_pointer_value(), 0, "closure_fn_ptr",
+                    ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    let fn_ptr = self.builder.build_load(ptr_ty, fn_ptr_ptr, "raw_fn")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    Ok(Some(fn_ptr.into_pointer_value()))
+                } else {
+                    Ok(None)
+                }
+            }
         }
     }
 
