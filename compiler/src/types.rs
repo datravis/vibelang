@@ -140,7 +140,7 @@ impl TypeChecker {
         );
         env.insert(
             "for_each".into(),
-            Type::Fn(vec![fn_t], Box::new(Type::Unit)),
+            Type::Fn(vec![fn_t.clone()], Box::new(Type::Unit)),
         );
         env.insert(
             "count".into(),
@@ -148,7 +148,51 @@ impl TypeChecker {
         );
         env.insert(
             "length".into(),
-            Type::Fn(vec![list_t], Box::new(Type::Int)),
+            Type::Fn(vec![list_t.clone()], Box::new(Type::Int)),
+        );
+        env.insert(
+            "take".into(),
+            Type::Fn(vec![Type::Int], Box::new(list_t.clone())),
+        );
+        env.insert(
+            "drop".into(),
+            Type::Fn(vec![Type::Int], Box::new(list_t.clone())),
+        );
+        env.insert(
+            "take_while".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(list_t.clone())),
+        );
+        env.insert(
+            "drop_while".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(list_t.clone())),
+        );
+        env.insert(
+            "any".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(Type::Bool)),
+        );
+        env.insert(
+            "all".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(Type::Bool)),
+        );
+        env.insert(
+            "reduce".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(Type::Unknown)),
+        );
+        env.insert(
+            "flat_map".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(list_t.clone())),
+        );
+        env.insert(
+            "first".into(),
+            Type::Fn(vec![], Box::new(Type::Unknown)),
+        );
+        env.insert(
+            "last".into(),
+            Type::Fn(vec![], Box::new(Type::Unknown)),
+        );
+        env.insert(
+            "inspect".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(list_t)),
         );
 
         Self {

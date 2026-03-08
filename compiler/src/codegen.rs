@@ -1671,13 +1671,151 @@ impl<'ctx> Codegen<'ctx> {
                                 "collect" | "collect_vec" => {
                                     return Ok(Some(input_val));
                                 }
-                                "count" => {
+                                "count" | "length" => {
                                     if input_val.is_pointer_value() {
                                         let len_fn = self.functions["vibe_list_length"];
                                         let result = self.builder.build_call(
                                             len_fn, &[input_val.into()], "pipe_count",
                                         ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
                                         return Ok(result.try_as_basic_value().left());
+                                    }
+                                }
+                                "take" if !args.is_empty() && input_val.is_pointer_value() => {
+                                    let n_val = self.compile_expr(&args[0], function)?.unwrap();
+                                    let n_i64 = self.ensure_i64(n_val);
+                                    let take_fn = self.functions["vibe_list_take"];
+                                    let result = self.builder.build_call(
+                                        take_fn,
+                                        &[input_val.into(), n_i64.into(), region_ptr.into()],
+                                        "pipe_take",
+                                    ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                    return Ok(result.try_as_basic_value().left());
+                                }
+                                "drop" if !args.is_empty() && input_val.is_pointer_value() => {
+                                    let n_val = self.compile_expr(&args[0], function)?.unwrap();
+                                    let n_i64 = self.ensure_i64(n_val);
+                                    let drop_fn = self.functions["vibe_list_drop"];
+                                    let result = self.builder.build_call(
+                                        drop_fn,
+                                        &[input_val.into(), n_i64.into()],
+                                        "pipe_drop",
+                                    ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                    return Ok(result.try_as_basic_value().left());
+                                }
+                                "take_while" if !args.is_empty() && input_val.is_pointer_value() => {
+                                    let func_ptr = self.resolve_raw_fn_ptr(&args[0], function)?;
+                                    if let Some(fp) = func_ptr {
+                                        let tw_fn = self.functions["vibe_list_take_while"];
+                                        let result = self.builder.build_call(
+                                            tw_fn,
+                                            &[input_val.into(), fp.into(), region_ptr.into()],
+                                            "pipe_take_while",
+                                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                        return Ok(result.try_as_basic_value().left());
+                                    }
+                                }
+                                "drop_while" if !args.is_empty() && input_val.is_pointer_value() => {
+                                    let func_ptr = self.resolve_raw_fn_ptr(&args[0], function)?;
+                                    if let Some(fp) = func_ptr {
+                                        let dw_fn = self.functions["vibe_list_drop_while"];
+                                        let result = self.builder.build_call(
+                                            dw_fn,
+                                            &[input_val.into(), fp.into()],
+                                            "pipe_drop_while",
+                                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                        return Ok(result.try_as_basic_value().left());
+                                    }
+                                }
+                                "any" if !args.is_empty() && input_val.is_pointer_value() => {
+                                    let func_ptr = self.resolve_raw_fn_ptr(&args[0], function)?;
+                                    if let Some(fp) = func_ptr {
+                                        let any_fn = self.functions["vibe_list_any"];
+                                        let result = self.builder.build_call(
+                                            any_fn,
+                                            &[input_val.into(), fp.into()],
+                                            "pipe_any",
+                                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                        return Ok(result.try_as_basic_value().left());
+                                    }
+                                }
+                                "all" if !args.is_empty() && input_val.is_pointer_value() => {
+                                    let func_ptr = self.resolve_raw_fn_ptr(&args[0], function)?;
+                                    if let Some(fp) = func_ptr {
+                                        let all_fn = self.functions["vibe_list_all"];
+                                        let result = self.builder.build_call(
+                                            all_fn,
+                                            &[input_val.into(), fp.into()],
+                                            "pipe_all",
+                                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                        return Ok(result.try_as_basic_value().left());
+                                    }
+                                }
+                                "reduce" if !args.is_empty() && input_val.is_pointer_value() => {
+                                    let func_ptr = self.resolve_raw_fn_ptr(&args[0], function)?;
+                                    if let Some(fp) = func_ptr {
+                                        let reduce_fn = self.functions["vibe_list_reduce"];
+                                        let result = self.builder.build_call(
+                                            reduce_fn,
+                                            &[input_val.into(), fp.into()],
+                                            "pipe_reduce",
+                                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                        return Ok(result.try_as_basic_value().left());
+                                    }
+                                }
+                                "last" => {
+                                    if input_val.is_pointer_value() {
+                                        let last_fn = self.functions["vibe_list_last"];
+                                        let result = self.builder.build_call(
+                                            last_fn, &[input_val.into()], "pipe_last",
+                                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                        return Ok(result.try_as_basic_value().left());
+                                    }
+                                }
+                                "first" => {
+                                    if input_val.is_pointer_value() {
+                                        let i64_ty = self.context.i64_type();
+                                        let cons_ty = self.context.struct_type(
+                                            &[i64_ty.into(), ptr_ty.into()], false,
+                                        );
+                                        let is_null = self.builder.build_is_null(input_val.into_pointer_value(), "is_null").unwrap();
+                                        let then_bb = self.context.append_basic_block(function, "first.some");
+                                        let else_bb = self.context.append_basic_block(function, "first.none");
+                                        let merge_bb = self.context.append_basic_block(function, "first.merge");
+                                        self.builder.build_conditional_branch(is_null, else_bb, then_bb).unwrap();
+                                        self.builder.position_at_end(then_bb);
+                                        let vp = self.builder.build_struct_gep(cons_ty, input_val.into_pointer_value(), 0, "fv").unwrap();
+                                        let v = self.builder.build_load(i64_ty, vp, "first").unwrap();
+                                        self.builder.build_unconditional_branch(merge_bb).unwrap();
+                                        self.builder.position_at_end(else_bb);
+                                        self.builder.build_unconditional_branch(merge_bb).unwrap();
+                                        self.builder.position_at_end(merge_bb);
+                                        let phi = self.builder.build_phi(i64_ty, "first_result").unwrap();
+                                        phi.add_incoming(&[(&v, then_bb), (&i64_ty.const_int(0, false), else_bb)]);
+                                        return Ok(Some(phi.as_basic_value()));
+                                    }
+                                }
+                                "flat_map" if !args.is_empty() && input_val.is_pointer_value() => {
+                                    let func_ptr = self.resolve_raw_fn_ptr(&args[0], function)?;
+                                    if let Some(fp) = func_ptr {
+                                        let flat_map_fn = self.functions["vibe_list_flat_map"];
+                                        let result = self.builder.build_call(
+                                            flat_map_fn,
+                                            &[input_val.into(), fp.into(), region_ptr.into()],
+                                            "pipe_flat_map",
+                                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                        return Ok(result.try_as_basic_value().left());
+                                    }
+                                }
+                                "inspect" if !args.is_empty() && input_val.is_pointer_value() => {
+                                    let func_ptr = self.resolve_raw_fn_ptr(&args[0], function)?;
+                                    if let Some(fp) = func_ptr {
+                                        let foreach_fn = self.functions["vibe_list_for_each"];
+                                        self.builder.build_call(
+                                            foreach_fn,
+                                            &[input_val.into(), fp.into()],
+                                            "",
+                                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                        return Ok(Some(input_val));
                                     }
                                 }
                                 _ => {}
@@ -2496,9 +2634,13 @@ impl<'ctx> Codegen<'ctx> {
         let i64_ty = self.context.i64_type();
         let base_val = self.compile_expr(base, function)?.unwrap();
 
-        // Try to find a matching record type to know field layout
-        // For now, if we can't find one, fall through to copying
-        for (_type_name, (struct_ty, field_names)) in &self.record_types.clone() {
+        // Find the matching record type by checking which one has all the update fields
+        let update_field_names: Vec<&str> = updates.iter().map(|(n, _)| n.as_str()).collect();
+        let matching_record = self.record_types.clone().into_iter().find(|(_, (_, field_names))| {
+            update_field_names.iter().all(|uf| field_names.iter().any(|f| f == uf))
+        });
+
+        if let Some((_type_name, (struct_ty, field_names))) = matching_record {
             let num_fields = field_names.len();
             let size = i64_ty.const_int((num_fields * 8) as u64, false);
             let new_ptr = self.region_alloc(size, function)?;
@@ -2506,9 +2648,9 @@ impl<'ctx> Codegen<'ctx> {
             // Copy all fields from base
             let base_ptr = base_val.into_pointer_value();
             for i in 0..num_fields {
-                let src = self.builder.build_struct_gep(*struct_ty, base_ptr, i as u32, "src")
+                let src = self.builder.build_struct_gep(struct_ty, base_ptr, i as u32, "src")
                     .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                let dst = self.builder.build_struct_gep(*struct_ty, new_ptr, i as u32, "dst")
+                let dst = self.builder.build_struct_gep(struct_ty, new_ptr, i as u32, "dst")
                     .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 let val = self.builder.build_load(i64_ty, src, "copy")
                     .map_err(|e| CodegenError::Llvm(e.to_string()))?;
@@ -2520,7 +2662,7 @@ impl<'ctx> Codegen<'ctx> {
             for (field_name, expr) in updates {
                 if let Some(idx) = field_names.iter().position(|n| n == field_name) {
                     let val = self.compile_expr(expr, function)?.unwrap();
-                    let dst = self.builder.build_struct_gep(*struct_ty, new_ptr, idx as u32, "upd")
+                    let dst = self.builder.build_struct_gep(struct_ty, new_ptr, idx as u32, "upd")
                         .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                     let store_val = self.ensure_i64(val);
                     self.builder.build_store(dst, store_val)
@@ -2528,11 +2670,11 @@ impl<'ctx> Codegen<'ctx> {
                 }
             }
 
-            return Ok(Some(new_ptr.into()));
+            Ok(Some(new_ptr.into()))
+        } else {
+            // Fallback: just return base
+            Ok(Some(base_val))
         }
-
-        // Fallback: just return base
-        Ok(Some(base_val))
     }
 
     /// Compile field access: base.field_name
@@ -3631,6 +3773,519 @@ impl<'ctx> Codegen<'ctx> {
             self.builder.position_at_end(done_bb);
             self.builder.build_return(None).unwrap();
         }
+
+        // vibe_list_take(list: ptr, n: i64, region: ptr) -> ptr
+        // Returns a new list with up to n elements from the front
+        let take_ty = ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into(), ptr_ty.into()], false);
+        let take_fn = self.llvm_module.add_function("vibe_list_take", take_ty, None);
+        self.functions.insert("vibe_list_take".into(), take_fn);
+        {
+            let entry = self.context.append_basic_block(take_fn, "entry");
+            let loop_bb = self.context.append_basic_block(take_fn, "loop");
+            let body_bb = self.context.append_basic_block(take_fn, "body");
+            let done_bb = self.context.append_basic_block(take_fn, "done");
+
+            self.builder.position_at_end(entry);
+            let list = take_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let n = take_fn.get_nth_param(1).unwrap().into_int_value();
+            let region = take_fn.get_nth_param(2).unwrap().into_pointer_value();
+
+            let result_head = self.builder.build_alloca(ptr_ty, "result_head").unwrap();
+            self.builder.build_store(result_head, ptr_ty.const_null()).unwrap();
+            let tail_ptr = self.builder.build_alloca(ptr_ty, "tail_ptr").unwrap();
+            self.builder.build_store(tail_ptr, result_head).unwrap();
+
+            let is_null = self.builder.build_is_null(list, "is_null").unwrap();
+            let n_zero = self.builder.build_int_compare(IntPredicate::SLE, n, i64_ty.const_int(0, false), "n_zero").unwrap();
+            let skip = self.builder.build_or(is_null, n_zero, "skip").unwrap();
+            self.builder.build_conditional_branch(skip, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(loop_bb);
+            let curr_phi = self.builder.build_phi(ptr_ty, "curr").unwrap();
+            curr_phi.add_incoming(&[(&list, entry)]);
+            let remaining_phi = self.builder.build_phi(i64_ty, "remaining").unwrap();
+            remaining_phi.add_incoming(&[(&n, entry)]);
+            let curr = curr_phi.as_basic_value().into_pointer_value();
+            let remaining = remaining_phi.as_basic_value().into_int_value();
+
+            let val_ptr = self.builder.build_struct_gep(cons_ty, curr, 0, "val_ptr").unwrap();
+            let val = self.builder.build_load(i64_ty, val_ptr, "val").unwrap();
+
+            let region_alloc_fn = self.functions["vibe_region_alloc"];
+            let new_cell = self.builder.build_call(region_alloc_fn, &[region.into(), cell_size.into()], "new_cell").unwrap()
+                .try_as_basic_value().left().unwrap().into_pointer_value();
+            let nv = self.builder.build_struct_gep(cons_ty, new_cell, 0, "nv").unwrap();
+            self.builder.build_store(nv, val).unwrap();
+            let nn = self.builder.build_struct_gep(cons_ty, new_cell, 1, "nn").unwrap();
+            self.builder.build_store(nn, ptr_ty.const_null()).unwrap();
+            let ct = self.builder.build_load(ptr_ty, tail_ptr, "ct").unwrap().into_pointer_value();
+            self.builder.build_store(ct, new_cell).unwrap();
+            self.builder.build_store(tail_ptr, nn).unwrap();
+
+            let new_remaining = self.builder.build_int_sub(remaining, i64_ty.const_int(1, false), "dec").unwrap();
+            let next_ptr = self.builder.build_struct_gep(cons_ty, curr, 1, "next_ptr").unwrap();
+            let next = self.builder.build_load(ptr_ty, next_ptr, "next").unwrap().into_pointer_value();
+            let next_null = self.builder.build_is_null(next, "next_null").unwrap();
+            let rem_zero = self.builder.build_int_compare(IntPredicate::SLE, new_remaining, i64_ty.const_int(0, false), "rem_zero").unwrap();
+            let stop = self.builder.build_or(next_null, rem_zero, "stop").unwrap();
+
+            curr_phi.add_incoming(&[(&next, body_bb)]);
+            remaining_phi.add_incoming(&[(&new_remaining, body_bb)]);
+            self.builder.build_unconditional_branch(body_bb).unwrap();
+
+            self.builder.position_at_end(body_bb);
+            self.builder.build_conditional_branch(stop, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(done_bb);
+            let result = self.builder.build_load(ptr_ty, result_head, "result").unwrap();
+            self.builder.build_return(Some(&result)).unwrap();
+        }
+
+        // vibe_list_drop(list: ptr, n: i64) -> ptr
+        // Skips first n elements, returns pointer to the rest (no allocation needed)
+        let drop_ty = ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false);
+        let drop_fn = self.llvm_module.add_function("vibe_list_drop", drop_ty, None);
+        self.functions.insert("vibe_list_drop".into(), drop_fn);
+        {
+            let entry = self.context.append_basic_block(drop_fn, "entry");
+            let loop_bb = self.context.append_basic_block(drop_fn, "loop");
+            let next_bb = self.context.append_basic_block(drop_fn, "next");
+            let done_bb = self.context.append_basic_block(drop_fn, "done");
+
+            self.builder.position_at_end(entry);
+            let list = drop_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let n = drop_fn.get_nth_param(1).unwrap().into_int_value();
+            let n_zero = self.builder.build_int_compare(IntPredicate::SLE, n, i64_ty.const_int(0, false), "n_zero").unwrap();
+            let is_null = self.builder.build_is_null(list, "is_null").unwrap();
+            let skip = self.builder.build_or(n_zero, is_null, "skip").unwrap();
+            self.builder.build_conditional_branch(skip, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(loop_bb);
+            let curr_phi = self.builder.build_phi(ptr_ty, "curr").unwrap();
+            curr_phi.add_incoming(&[(&list, entry)]);
+            let remaining_phi = self.builder.build_phi(i64_ty, "remaining").unwrap();
+            remaining_phi.add_incoming(&[(&n, entry)]);
+            let curr = curr_phi.as_basic_value().into_pointer_value();
+            let remaining = remaining_phi.as_basic_value().into_int_value();
+
+            let next_ptr_gep = self.builder.build_struct_gep(cons_ty, curr, 1, "next_ptr").unwrap();
+            let next = self.builder.build_load(ptr_ty, next_ptr_gep, "next").unwrap().into_pointer_value();
+            let new_remaining = self.builder.build_int_sub(remaining, i64_ty.const_int(1, false), "dec").unwrap();
+            let next_null = self.builder.build_is_null(next, "next_null").unwrap();
+            let rem_zero = self.builder.build_int_compare(IntPredicate::SLE, new_remaining, i64_ty.const_int(0, false), "rem_zero").unwrap();
+            let stop = self.builder.build_or(next_null, rem_zero, "stop").unwrap();
+
+            curr_phi.add_incoming(&[(&next, next_bb)]);
+            remaining_phi.add_incoming(&[(&new_remaining, next_bb)]);
+            self.builder.build_unconditional_branch(next_bb).unwrap();
+
+            self.builder.position_at_end(next_bb);
+            self.builder.build_conditional_branch(stop, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(done_bb);
+            let result_phi = self.builder.build_phi(ptr_ty, "result").unwrap();
+            result_phi.add_incoming(&[(&list, entry), (&next, next_bb)]);
+            self.builder.build_return(Some(&result_phi.as_basic_value())).unwrap();
+        }
+
+        // vibe_list_take_while(list: ptr, pred: ptr, region: ptr) -> ptr
+        let take_while_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()], false);
+        let take_while_fn = self.llvm_module.add_function("vibe_list_take_while", take_while_ty, None);
+        self.functions.insert("vibe_list_take_while".into(), take_while_fn);
+        {
+            let entry = self.context.append_basic_block(take_while_fn, "entry");
+            let loop_bb = self.context.append_basic_block(take_while_fn, "loop");
+            let check_bb = self.context.append_basic_block(take_while_fn, "check");
+            let keep_bb = self.context.append_basic_block(take_while_fn, "keep");
+            let done_bb = self.context.append_basic_block(take_while_fn, "done");
+
+            self.builder.position_at_end(entry);
+            let list = take_while_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let pred_ptr = take_while_fn.get_nth_param(1).unwrap().into_pointer_value();
+            let region = take_while_fn.get_nth_param(2).unwrap().into_pointer_value();
+
+            let result_head = self.builder.build_alloca(ptr_ty, "result_head").unwrap();
+            self.builder.build_store(result_head, ptr_ty.const_null()).unwrap();
+            let tail_ptr = self.builder.build_alloca(ptr_ty, "tail_ptr").unwrap();
+            self.builder.build_store(tail_ptr, result_head).unwrap();
+
+            let is_null = self.builder.build_is_null(list, "is_null").unwrap();
+            self.builder.build_conditional_branch(is_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(loop_bb);
+            let curr_phi = self.builder.build_phi(ptr_ty, "curr").unwrap();
+            curr_phi.add_incoming(&[(&list, entry)]);
+            let curr = curr_phi.as_basic_value().into_pointer_value();
+
+            let val_ptr = self.builder.build_struct_gep(cons_ty, curr, 0, "val_ptr").unwrap();
+            let val = self.builder.build_load(i64_ty, val_ptr, "val").unwrap();
+
+            let pred_fn_ty = i64_ty.fn_type(&[i64_ty.into()], false);
+            let pred_result = self.builder.build_indirect_call(pred_fn_ty, pred_ptr, &[val.into()], "pred").unwrap();
+            let pred_val = pred_result.try_as_basic_value().left().unwrap_or_else(|| i64_ty.const_int(0, false).into());
+
+            self.builder.build_unconditional_branch(check_bb).unwrap();
+
+            self.builder.position_at_end(check_bb);
+            let keep = self.builder.build_int_compare(IntPredicate::NE, pred_val.into_int_value(), i64_ty.const_int(0, false), "keep").unwrap();
+            self.builder.build_conditional_branch(keep, keep_bb, done_bb).unwrap();
+
+            self.builder.position_at_end(keep_bb);
+            let region_alloc_fn = self.functions["vibe_region_alloc"];
+            let new_cell = self.builder.build_call(region_alloc_fn, &[region.into(), cell_size.into()], "new_cell").unwrap()
+                .try_as_basic_value().left().unwrap().into_pointer_value();
+            let nv = self.builder.build_struct_gep(cons_ty, new_cell, 0, "nv").unwrap();
+            self.builder.build_store(nv, val).unwrap();
+            let nn = self.builder.build_struct_gep(cons_ty, new_cell, 1, "nn").unwrap();
+            self.builder.build_store(nn, ptr_ty.const_null()).unwrap();
+            let ct = self.builder.build_load(ptr_ty, tail_ptr, "ct").unwrap().into_pointer_value();
+            self.builder.build_store(ct, new_cell).unwrap();
+            self.builder.build_store(tail_ptr, nn).unwrap();
+
+            let next_ptr = self.builder.build_struct_gep(cons_ty, curr, 1, "next_ptr").unwrap();
+            let next = self.builder.build_load(ptr_ty, next_ptr, "next").unwrap().into_pointer_value();
+            let next_null = self.builder.build_is_null(next, "next_null").unwrap();
+            curr_phi.add_incoming(&[(&next, keep_bb)]);
+            self.builder.build_conditional_branch(next_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(done_bb);
+            let result = self.builder.build_load(ptr_ty, result_head, "result").unwrap();
+            self.builder.build_return(Some(&result)).unwrap();
+        }
+
+        // vibe_list_drop_while(list: ptr, pred: ptr) -> ptr
+        let drop_while_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let drop_while_fn = self.llvm_module.add_function("vibe_list_drop_while", drop_while_ty, None);
+        self.functions.insert("vibe_list_drop_while".into(), drop_while_fn);
+        {
+            let entry = self.context.append_basic_block(drop_while_fn, "entry");
+            let loop_bb = self.context.append_basic_block(drop_while_fn, "loop");
+            let check_bb = self.context.append_basic_block(drop_while_fn, "check");
+            let done_bb = self.context.append_basic_block(drop_while_fn, "done");
+
+            self.builder.position_at_end(entry);
+            let list = drop_while_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let pred_ptr = drop_while_fn.get_nth_param(1).unwrap().into_pointer_value();
+
+            let is_null = self.builder.build_is_null(list, "is_null").unwrap();
+            self.builder.build_conditional_branch(is_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(loop_bb);
+            let curr_phi = self.builder.build_phi(ptr_ty, "curr").unwrap();
+            curr_phi.add_incoming(&[(&list, entry)]);
+            let curr = curr_phi.as_basic_value().into_pointer_value();
+
+            let val_ptr = self.builder.build_struct_gep(cons_ty, curr, 0, "val_ptr").unwrap();
+            let val = self.builder.build_load(i64_ty, val_ptr, "val").unwrap();
+
+            let pred_fn_ty = i64_ty.fn_type(&[i64_ty.into()], false);
+            let pred_result = self.builder.build_indirect_call(pred_fn_ty, pred_ptr, &[val.into()], "pred").unwrap();
+            let pred_val = pred_result.try_as_basic_value().left().unwrap_or_else(|| i64_ty.const_int(0, false).into());
+
+            self.builder.build_unconditional_branch(check_bb).unwrap();
+
+            self.builder.position_at_end(check_bb);
+            let should_drop = self.builder.build_int_compare(IntPredicate::NE, pred_val.into_int_value(), i64_ty.const_int(0, false), "drop").unwrap();
+
+            let continue_bb = self.context.append_basic_block(drop_while_fn, "continue");
+            self.builder.build_conditional_branch(should_drop, continue_bb, done_bb).unwrap();
+
+            self.builder.position_at_end(continue_bb);
+            let next_ptr = self.builder.build_struct_gep(cons_ty, curr, 1, "next_ptr").unwrap();
+            let next = self.builder.build_load(ptr_ty, next_ptr, "next").unwrap().into_pointer_value();
+            let next_null = self.builder.build_is_null(next, "next_null").unwrap();
+            curr_phi.add_incoming(&[(&next, continue_bb)]);
+            self.builder.build_conditional_branch(next_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(done_bb);
+            let result_phi = self.builder.build_phi(ptr_ty, "result").unwrap();
+            result_phi.add_incoming(&[(&ptr_ty.const_null(), entry), (&curr, check_bb), (&ptr_ty.const_null(), continue_bb)]);
+            self.builder.build_return(Some(&result_phi.as_basic_value())).unwrap();
+        }
+
+        // vibe_list_any(list: ptr, pred: ptr) -> i64 (0 or 1)
+        let any_ty = i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let any_fn = self.llvm_module.add_function("vibe_list_any", any_ty, None);
+        self.functions.insert("vibe_list_any".into(), any_fn);
+        {
+            let entry = self.context.append_basic_block(any_fn, "entry");
+            let loop_bb = self.context.append_basic_block(any_fn, "loop");
+            let check_bb = self.context.append_basic_block(any_fn, "check");
+            let next_bb = self.context.append_basic_block(any_fn, "next");
+            let found_bb = self.context.append_basic_block(any_fn, "found");
+            let not_found_bb = self.context.append_basic_block(any_fn, "not_found");
+
+            self.builder.position_at_end(entry);
+            let list = any_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let pred_ptr = any_fn.get_nth_param(1).unwrap().into_pointer_value();
+            let is_null = self.builder.build_is_null(list, "is_null").unwrap();
+            self.builder.build_conditional_branch(is_null, not_found_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(loop_bb);
+            let curr_phi = self.builder.build_phi(ptr_ty, "curr").unwrap();
+            curr_phi.add_incoming(&[(&list, entry)]);
+            let curr = curr_phi.as_basic_value().into_pointer_value();
+
+            let val_ptr = self.builder.build_struct_gep(cons_ty, curr, 0, "val_ptr").unwrap();
+            let val = self.builder.build_load(i64_ty, val_ptr, "val").unwrap();
+            let pred_fn_ty = i64_ty.fn_type(&[i64_ty.into()], false);
+            let pred_result = self.builder.build_indirect_call(pred_fn_ty, pred_ptr, &[val.into()], "pred").unwrap();
+            let pred_val = pred_result.try_as_basic_value().left().unwrap_or_else(|| i64_ty.const_int(0, false).into());
+            self.builder.build_unconditional_branch(check_bb).unwrap();
+
+            self.builder.position_at_end(check_bb);
+            let is_true = self.builder.build_int_compare(IntPredicate::NE, pred_val.into_int_value(), i64_ty.const_int(0, false), "is_true").unwrap();
+            self.builder.build_conditional_branch(is_true, found_bb, next_bb).unwrap();
+
+            self.builder.position_at_end(next_bb);
+            let next_ptr = self.builder.build_struct_gep(cons_ty, curr, 1, "next_ptr").unwrap();
+            let next = self.builder.build_load(ptr_ty, next_ptr, "next").unwrap().into_pointer_value();
+            let next_null = self.builder.build_is_null(next, "next_null").unwrap();
+            curr_phi.add_incoming(&[(&next, next_bb)]);
+            self.builder.build_conditional_branch(next_null, not_found_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(found_bb);
+            self.builder.build_return(Some(&i64_ty.const_int(1, false))).unwrap();
+
+            self.builder.position_at_end(not_found_bb);
+            self.builder.build_return(Some(&i64_ty.const_int(0, false))).unwrap();
+        }
+
+        // vibe_list_all(list: ptr, pred: ptr) -> i64 (0 or 1)
+        let all_ty = i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let all_fn = self.llvm_module.add_function("vibe_list_all", all_ty, None);
+        self.functions.insert("vibe_list_all".into(), all_fn);
+        {
+            let entry = self.context.append_basic_block(all_fn, "entry");
+            let loop_bb = self.context.append_basic_block(all_fn, "loop");
+            let check_bb = self.context.append_basic_block(all_fn, "check");
+            let next_bb = self.context.append_basic_block(all_fn, "next");
+            let all_true_bb = self.context.append_basic_block(all_fn, "all_true");
+            let not_all_bb = self.context.append_basic_block(all_fn, "not_all");
+
+            self.builder.position_at_end(entry);
+            let list = all_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let pred_ptr = all_fn.get_nth_param(1).unwrap().into_pointer_value();
+            let is_null = self.builder.build_is_null(list, "is_null").unwrap();
+            self.builder.build_conditional_branch(is_null, all_true_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(loop_bb);
+            let curr_phi = self.builder.build_phi(ptr_ty, "curr").unwrap();
+            curr_phi.add_incoming(&[(&list, entry)]);
+            let curr = curr_phi.as_basic_value().into_pointer_value();
+
+            let val_ptr = self.builder.build_struct_gep(cons_ty, curr, 0, "val_ptr").unwrap();
+            let val = self.builder.build_load(i64_ty, val_ptr, "val").unwrap();
+            let pred_fn_ty = i64_ty.fn_type(&[i64_ty.into()], false);
+            let pred_result = self.builder.build_indirect_call(pred_fn_ty, pred_ptr, &[val.into()], "pred").unwrap();
+            let pred_val = pred_result.try_as_basic_value().left().unwrap_or_else(|| i64_ty.const_int(0, false).into());
+            self.builder.build_unconditional_branch(check_bb).unwrap();
+
+            self.builder.position_at_end(check_bb);
+            let is_false = self.builder.build_int_compare(IntPredicate::EQ, pred_val.into_int_value(), i64_ty.const_int(0, false), "is_false").unwrap();
+            self.builder.build_conditional_branch(is_false, not_all_bb, next_bb).unwrap();
+
+            self.builder.position_at_end(next_bb);
+            let next_ptr = self.builder.build_struct_gep(cons_ty, curr, 1, "next_ptr").unwrap();
+            let next = self.builder.build_load(ptr_ty, next_ptr, "next").unwrap().into_pointer_value();
+            let next_null = self.builder.build_is_null(next, "next_null").unwrap();
+            curr_phi.add_incoming(&[(&next, next_bb)]);
+            self.builder.build_conditional_branch(next_null, all_true_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(all_true_bb);
+            self.builder.build_return(Some(&i64_ty.const_int(1, false))).unwrap();
+
+            self.builder.position_at_end(not_all_bb);
+            self.builder.build_return(Some(&i64_ty.const_int(0, false))).unwrap();
+        }
+
+        // vibe_list_reduce(list: ptr, fn: ptr) -> i64
+        // Like fold but uses first element as initial value
+        let reduce_ty = i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let reduce_fn = self.llvm_module.add_function("vibe_list_reduce", reduce_ty, None);
+        self.functions.insert("vibe_list_reduce".into(), reduce_fn);
+        {
+            let entry = self.context.append_basic_block(reduce_fn, "entry");
+            let loop_bb = self.context.append_basic_block(reduce_fn, "loop");
+            let next_bb = self.context.append_basic_block(reduce_fn, "next");
+            let done_bb = self.context.append_basic_block(reduce_fn, "done");
+            let empty_bb = self.context.append_basic_block(reduce_fn, "empty");
+
+            self.builder.position_at_end(entry);
+            let list = reduce_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let fn_ptr = reduce_fn.get_nth_param(1).unwrap().into_pointer_value();
+            let is_null = self.builder.build_is_null(list, "is_null").unwrap();
+            self.builder.build_conditional_branch(is_null, empty_bb, loop_bb).unwrap();
+
+            // Use first element as initial accumulator
+            self.builder.position_at_end(loop_bb);
+            let val0_ptr = self.builder.build_struct_gep(cons_ty, list, 0, "val0_ptr").unwrap();
+            let val0 = self.builder.build_load(i64_ty, val0_ptr, "val0").unwrap();
+            let next0_ptr = self.builder.build_struct_gep(cons_ty, list, 1, "next0_ptr").unwrap();
+            let next0 = self.builder.build_load(ptr_ty, next0_ptr, "next0").unwrap().into_pointer_value();
+            let next0_null = self.builder.build_is_null(next0, "next0_null").unwrap();
+            self.builder.build_conditional_branch(next0_null, done_bb, next_bb).unwrap();
+
+            self.builder.position_at_end(next_bb);
+            let curr_phi = self.builder.build_phi(ptr_ty, "curr").unwrap();
+            curr_phi.add_incoming(&[(&next0, loop_bb)]);
+            let acc_phi = self.builder.build_phi(i64_ty, "acc").unwrap();
+            acc_phi.add_incoming(&[(&val0, loop_bb)]);
+            let curr = curr_phi.as_basic_value().into_pointer_value();
+            let acc = acc_phi.as_basic_value().into_int_value();
+
+            let val_ptr = self.builder.build_struct_gep(cons_ty, curr, 0, "val_ptr").unwrap();
+            let val = self.builder.build_load(i64_ty, val_ptr, "val").unwrap();
+
+            let fold_fn_ty = i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false);
+            let new_acc = self.builder.build_indirect_call(fold_fn_ty, fn_ptr, &[acc.into(), val.into()], "new_acc").unwrap();
+            let new_acc_val = new_acc.try_as_basic_value().left().unwrap_or_else(|| i64_ty.const_int(0, false).into());
+
+            let next_ptr = self.builder.build_struct_gep(cons_ty, curr, 1, "next_ptr").unwrap();
+            let next = self.builder.build_load(ptr_ty, next_ptr, "next").unwrap().into_pointer_value();
+            let next_null = self.builder.build_is_null(next, "next_null").unwrap();
+
+            let advance_bb = self.context.append_basic_block(reduce_fn, "advance");
+            self.builder.build_unconditional_branch(advance_bb).unwrap();
+
+            self.builder.position_at_end(advance_bb);
+            curr_phi.add_incoming(&[(&next, advance_bb)]);
+            acc_phi.add_incoming(&[(&new_acc_val, advance_bb)]);
+            self.builder.build_conditional_branch(next_null, done_bb, next_bb).unwrap();
+
+            self.builder.position_at_end(done_bb);
+            let result_phi = self.builder.build_phi(i64_ty, "result").unwrap();
+            result_phi.add_incoming(&[(&val0, loop_bb), (&new_acc_val, advance_bb)]);
+            self.builder.build_return(Some(&result_phi.as_basic_value())).unwrap();
+
+            self.builder.position_at_end(empty_bb);
+            self.builder.build_return(Some(&i64_ty.const_int(0, false))).unwrap();
+        }
+
+        // vibe_list_last(list: ptr) -> i64
+        let last_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+        let last_fn = self.llvm_module.add_function("vibe_list_last", last_ty, None);
+        self.functions.insert("vibe_list_last".into(), last_fn);
+        {
+            let entry = self.context.append_basic_block(last_fn, "entry");
+            let loop_bb = self.context.append_basic_block(last_fn, "loop");
+            let next_bb = self.context.append_basic_block(last_fn, "next");
+            let done_bb = self.context.append_basic_block(last_fn, "done");
+
+            self.builder.position_at_end(entry);
+            let list = last_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let is_null = self.builder.build_is_null(list, "is_null").unwrap();
+            self.builder.build_conditional_branch(is_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(loop_bb);
+            let curr_phi = self.builder.build_phi(ptr_ty, "curr").unwrap();
+            curr_phi.add_incoming(&[(&list, entry)]);
+            let curr = curr_phi.as_basic_value().into_pointer_value();
+
+            // Load current element's value (this will be the "last" if next is null)
+            let val_ptr = self.builder.build_struct_gep(cons_ty, curr, 0, "val_ptr").unwrap();
+            let curr_val = self.builder.build_load(i64_ty, val_ptr, "curr_val").unwrap();
+
+            let next_ptr = self.builder.build_struct_gep(cons_ty, curr, 1, "next_ptr").unwrap();
+            let next = self.builder.build_load(ptr_ty, next_ptr, "next").unwrap().into_pointer_value();
+            let next_null = self.builder.build_is_null(next, "next_null").unwrap();
+            curr_phi.add_incoming(&[(&next, next_bb)]);
+            self.builder.build_unconditional_branch(next_bb).unwrap();
+
+            self.builder.position_at_end(next_bb);
+            self.builder.build_conditional_branch(next_null, done_bb, loop_bb).unwrap();
+
+            self.builder.position_at_end(done_bb);
+            let result_phi = self.builder.build_phi(i64_ty, "result").unwrap();
+            result_phi.add_incoming(&[(&i64_ty.const_int(0, false), entry), (&curr_val, next_bb)]);
+            self.builder.build_return(Some(&result_phi.as_basic_value())).unwrap();
+        }
+
+        // vibe_list_flat_map(list: ptr, fn: ptr, region: ptr) -> ptr
+        // fn takes i64, returns ptr (a list) — concatenate all result lists
+        let flat_map_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()], false);
+        let flat_map_fn = self.llvm_module.add_function("vibe_list_flat_map", flat_map_ty, None);
+        self.functions.insert("vibe_list_flat_map".into(), flat_map_fn);
+        {
+            let entry = self.context.append_basic_block(flat_map_fn, "entry");
+            let outer_loop = self.context.append_basic_block(flat_map_fn, "outer_loop");
+            let inner_loop = self.context.append_basic_block(flat_map_fn, "inner_loop");
+            let inner_body = self.context.append_basic_block(flat_map_fn, "inner_body");
+            let outer_next = self.context.append_basic_block(flat_map_fn, "outer_next");
+            let done_bb = self.context.append_basic_block(flat_map_fn, "done");
+
+            self.builder.position_at_end(entry);
+            let list = flat_map_fn.get_nth_param(0).unwrap().into_pointer_value();
+            let func_ptr = flat_map_fn.get_nth_param(1).unwrap().into_pointer_value();
+            let region = flat_map_fn.get_nth_param(2).unwrap().into_pointer_value();
+
+            let result_head = self.builder.build_alloca(ptr_ty, "result_head").unwrap();
+            self.builder.build_store(result_head, ptr_ty.const_null()).unwrap();
+            let tail_ptr = self.builder.build_alloca(ptr_ty, "tail_ptr").unwrap();
+            self.builder.build_store(tail_ptr, result_head).unwrap();
+
+            let is_null = self.builder.build_is_null(list, "is_null").unwrap();
+            self.builder.build_conditional_branch(is_null, done_bb, outer_loop).unwrap();
+
+            // Outer loop: iterate over source list
+            self.builder.position_at_end(outer_loop);
+            let outer_phi = self.builder.build_phi(ptr_ty, "outer_curr").unwrap();
+            outer_phi.add_incoming(&[(&list, entry)]);
+            let outer_curr = outer_phi.as_basic_value().into_pointer_value();
+
+            let val_ptr = self.builder.build_struct_gep(cons_ty, outer_curr, 0, "val_ptr").unwrap();
+            let val = self.builder.build_load(i64_ty, val_ptr, "val").unwrap();
+
+            // Call fn(val) -> ptr (sub-list)
+            let fn_ty = ptr_ty.fn_type(&[i64_ty.into()], false);
+            let sub_list_result = self.builder.build_indirect_call(fn_ty, func_ptr, &[val.into()], "sub_list").unwrap();
+            let sub_list = sub_list_result.try_as_basic_value().left()
+                .unwrap_or_else(|| ptr_ty.const_null().into()).into_pointer_value();
+
+            let sub_null = self.builder.build_is_null(sub_list, "sub_null").unwrap();
+            self.builder.build_conditional_branch(sub_null, outer_next, inner_loop).unwrap();
+
+            // Inner loop: copy sub-list elements to result
+            self.builder.position_at_end(inner_loop);
+            let inner_phi = self.builder.build_phi(ptr_ty, "inner_curr").unwrap();
+            inner_phi.add_incoming(&[(&sub_list, outer_loop)]);
+            let inner_curr = inner_phi.as_basic_value().into_pointer_value();
+
+            let iv_ptr = self.builder.build_struct_gep(cons_ty, inner_curr, 0, "iv_ptr").unwrap();
+            let iv = self.builder.build_load(i64_ty, iv_ptr, "iv").unwrap();
+
+            let region_alloc_fn = self.functions["vibe_region_alloc"];
+            let new_cell = self.builder.build_call(region_alloc_fn, &[region.into(), cell_size.into()], "new_cell").unwrap()
+                .try_as_basic_value().left().unwrap().into_pointer_value();
+            let nv = self.builder.build_struct_gep(cons_ty, new_cell, 0, "nv").unwrap();
+            self.builder.build_store(nv, iv).unwrap();
+            let nn = self.builder.build_struct_gep(cons_ty, new_cell, 1, "nn").unwrap();
+            self.builder.build_store(nn, ptr_ty.const_null()).unwrap();
+            let ct = self.builder.build_load(ptr_ty, tail_ptr, "ct").unwrap().into_pointer_value();
+            self.builder.build_store(ct, new_cell).unwrap();
+            self.builder.build_store(tail_ptr, nn).unwrap();
+
+            let in_next_ptr = self.builder.build_struct_gep(cons_ty, inner_curr, 1, "in_next_ptr").unwrap();
+            let in_next = self.builder.build_load(ptr_ty, in_next_ptr, "in_next").unwrap().into_pointer_value();
+            let in_next_null = self.builder.build_is_null(in_next, "in_next_null").unwrap();
+            inner_phi.add_incoming(&[(&in_next, inner_body)]);
+            self.builder.build_unconditional_branch(inner_body).unwrap();
+
+            self.builder.position_at_end(inner_body);
+            self.builder.build_conditional_branch(in_next_null, outer_next, inner_loop).unwrap();
+
+            // Advance outer loop
+            self.builder.position_at_end(outer_next);
+            let out_next_ptr = self.builder.build_struct_gep(cons_ty, outer_curr, 1, "out_next_ptr").unwrap();
+            let out_next = self.builder.build_load(ptr_ty, out_next_ptr, "out_next").unwrap().into_pointer_value();
+            let out_next_null = self.builder.build_is_null(out_next, "out_next_null").unwrap();
+            outer_phi.add_incoming(&[(&out_next, outer_next)]);
+            self.builder.build_conditional_branch(out_next_null, done_bb, outer_loop).unwrap();
+
+            self.builder.position_at_end(done_bb);
+            let result = self.builder.build_load(ptr_ty, result_head, "result").unwrap();
+            self.builder.build_return(Some(&result)).unwrap();
+        }
     }
 
     /// Try to compile a built-in pipeline function call (source, map, filter, fold, collect, etc.)
@@ -3811,8 +4466,161 @@ impl<'ctx> Codegen<'ctx> {
                         current = phi.as_basic_value();
                     }
                 }
-                _ => {
-                    // Other stages: pass through for now
+                PipelineStage::Last => {
+                    if current.is_pointer_value() {
+                        let last_fn = self.functions["vibe_list_last"];
+                        let result = self.builder.build_call(
+                            last_fn, &[current.into()], "last",
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        current = result.try_as_basic_value().left()
+                            .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+                    }
+                }
+                PipelineStage::Take(n_expr) => {
+                    if current.is_pointer_value() {
+                        let n_val = self.compile_expr(n_expr, function)?.unwrap();
+                        let n_i64 = self.ensure_i64(n_val);
+                        let take_fn = self.functions["vibe_list_take"];
+                        let result = self.builder.build_call(
+                            take_fn,
+                            &[current.into(), n_i64.into(), region_ptr.into()],
+                            "taken",
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        current = result.try_as_basic_value().left()
+                            .unwrap_or_else(|| ptr_ty.const_null().into());
+                    }
+                }
+                PipelineStage::Drop(n_expr) => {
+                    if current.is_pointer_value() {
+                        let n_val = self.compile_expr(n_expr, function)?.unwrap();
+                        let n_i64 = self.ensure_i64(n_val);
+                        let drop_fn = self.functions["vibe_list_drop"];
+                        let result = self.builder.build_call(
+                            drop_fn,
+                            &[current.into(), n_i64.into()],
+                            "dropped",
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        current = result.try_as_basic_value().left()
+                            .unwrap_or_else(|| ptr_ty.const_null().into());
+                    }
+                }
+                PipelineStage::TakeWhile(pred_expr) => {
+                    if let Some(func_ptr) = self.resolve_raw_fn_ptr(pred_expr, function)? {
+                        if current.is_pointer_value() {
+                            let tw_fn = self.functions["vibe_list_take_while"];
+                            let result = self.builder.build_call(
+                                tw_fn,
+                                &[current.into(), func_ptr.into(), region_ptr.into()],
+                                "take_while",
+                            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            current = result.try_as_basic_value().left()
+                                .unwrap_or_else(|| ptr_ty.const_null().into());
+                        }
+                    }
+                }
+                PipelineStage::DropWhile(pred_expr) => {
+                    if let Some(func_ptr) = self.resolve_raw_fn_ptr(pred_expr, function)? {
+                        if current.is_pointer_value() {
+                            let dw_fn = self.functions["vibe_list_drop_while"];
+                            let result = self.builder.build_call(
+                                dw_fn,
+                                &[current.into(), func_ptr.into()],
+                                "drop_while",
+                            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            current = result.try_as_basic_value().left()
+                                .unwrap_or_else(|| ptr_ty.const_null().into());
+                        }
+                    }
+                }
+                PipelineStage::Any(pred_expr) => {
+                    if let Some(func_ptr) = self.resolve_raw_fn_ptr(pred_expr, function)? {
+                        if current.is_pointer_value() {
+                            let any_fn = self.functions["vibe_list_any"];
+                            let result = self.builder.build_call(
+                                any_fn,
+                                &[current.into(), func_ptr.into()],
+                                "any_result",
+                            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            current = result.try_as_basic_value().left()
+                                .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+                        }
+                    }
+                }
+                PipelineStage::All(pred_expr) => {
+                    if let Some(func_ptr) = self.resolve_raw_fn_ptr(pred_expr, function)? {
+                        if current.is_pointer_value() {
+                            let all_fn = self.functions["vibe_list_all"];
+                            let result = self.builder.build_call(
+                                all_fn,
+                                &[current.into(), func_ptr.into()],
+                                "all_result",
+                            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            current = result.try_as_basic_value().left()
+                                .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+                        }
+                    }
+                }
+                PipelineStage::Reduce(func_expr) => {
+                    if let Some(func_ptr) = self.resolve_raw_fn_ptr(func_expr, function)? {
+                        if current.is_pointer_value() {
+                            let reduce_fn = self.functions["vibe_list_reduce"];
+                            let result = self.builder.build_call(
+                                reduce_fn,
+                                &[current.into(), func_ptr.into()],
+                                "reduced",
+                            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            current = result.try_as_basic_value().left()
+                                .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+                        }
+                    }
+                }
+                PipelineStage::FlatMap(func_expr) => {
+                    if let Some(func_ptr) = self.resolve_raw_fn_ptr(func_expr, function)? {
+                        if current.is_pointer_value() {
+                            let flat_map_fn = self.functions["vibe_list_flat_map"];
+                            let result = self.builder.build_call(
+                                flat_map_fn,
+                                &[current.into(), func_ptr.into(), region_ptr.into()],
+                                "flat_mapped",
+                            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            current = result.try_as_basic_value().left()
+                                .unwrap_or_else(|| ptr_ty.const_null().into());
+                        }
+                    }
+                }
+                PipelineStage::FilterMap(func_expr) => {
+                    // FilterMap: apply function, keep non-zero results
+                    // Implemented as map + filter(nonzero) for simplicity
+                    if let Some(func_ptr) = self.resolve_raw_fn_ptr(func_expr, function)? {
+                        if current.is_pointer_value() {
+                            let map_fn = self.functions["vibe_list_map"];
+                            let result = self.builder.build_call(
+                                map_fn,
+                                &[current.into(), func_ptr.into(), region_ptr.into()],
+                                "filter_mapped",
+                            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            current = result.try_as_basic_value().left()
+                                .unwrap_or_else(|| ptr_ty.const_null().into());
+                        }
+                    }
+                }
+                PipelineStage::Inspect(func_expr) => {
+                    // Inspect: call function for side effects, pass through unchanged
+                    if let Some(func_ptr) = self.resolve_raw_fn_ptr(func_expr, function)? {
+                        if current.is_pointer_value() {
+                            let foreach_fn = self.functions["vibe_list_for_each"];
+                            self.builder.build_call(
+                                foreach_fn,
+                                &[current.into(), func_ptr.into()],
+                                "",
+                            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            // current stays unchanged - inspect is transparent
+                        }
+                    }
+                }
+                PipelineStage::Scan(_, _) | PipelineStage::SortBy(_) |
+                PipelineStage::GroupBy(_) | PipelineStage::Chunk(_) => {
+                    // Complex stages: pass through for now
                 }
             }
         }

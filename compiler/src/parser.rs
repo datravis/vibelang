@@ -952,10 +952,45 @@ impl Parser {
                 Ok(Expr::List(elems, span))
             }
 
-            // Record literal
+            // Record literal or record update: { field: val } or { base | field: val }
             TokenKind::LBrace => {
                 let span = self.span();
                 self.advance();
+
+                // Check for record update syntax: { expr | field: val, ... }
+                // We need to look ahead: if we see `ident |` it's an update
+                if let TokenKind::Ident(_) = self.peek().clone() {
+                    // Save position to backtrack if not an update
+                    let saved_pos = self.pos;
+                    let (name, _) = self.expect_ident()?;
+
+                    if *self.peek() == TokenKind::Pipe {
+                        // Record update: { base_var | field: val, ... }
+                        self.advance(); // consume '|'
+                        let base = Expr::Ident(name, span.clone());
+                        let mut updates = Vec::new();
+                        loop {
+                            if *self.peek() == TokenKind::RBrace {
+                                break;
+                            }
+                            let (field_name, _) = self.expect_ident()?;
+                            self.expect(&TokenKind::Colon)?;
+                            let value = self.parse_expr()?;
+                            updates.push((field_name, value));
+                            if *self.peek() == TokenKind::Comma {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        self.expect(&TokenKind::RBrace)?;
+                        return Ok(Expr::RecordUpdate(Box::new(base), updates, span));
+                    } else {
+                        // Not an update, backtrack and parse as normal record
+                        self.pos = saved_pos;
+                    }
+                }
+
                 let mut fields = Vec::new();
                 loop {
                     if *self.peek() == TokenKind::RBrace {
