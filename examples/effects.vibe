@@ -1,0 +1,22 @@
+module main
+
+-- Define a Logger effect
+effect Logger {
+    fn log(msg: String) -> Int
+}
+
+-- A function that uses the Logger effect
+fn greet(name: String) -> Int with Logger = do
+    log("Hello from VibeLang effects!")
+    log(name)
+    42
+
+-- Main provides the Logger handler implementation
+-- The handler intercepts log() calls and routes them to print()
+fn main() -> Int = do
+    let result = handle greet("World")
+        with Logger {
+            log(msg) -> resume(do print(msg) 0)
+        }
+    print(result)
+    0

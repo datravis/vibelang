@@ -214,6 +214,7 @@ impl Parser {
             TokenKind::Trait => Ok(Decl::TraitDef(self.parse_trait_def()?)),
             TokenKind::Impl => Ok(Decl::ImplBlock(self.parse_impl_block()?)),
             TokenKind::Effect => Ok(Decl::EffectDef(self.parse_effect_def()?)),
+            TokenKind::Vibe => Ok(Decl::VibeDecl(self.parse_vibe_decl()?)),
             _ => {
                 let span = self.span();
                 Err(ParseError::Unexpected(
@@ -362,6 +363,34 @@ impl Parser {
                     Ok(first)
                 }
             }
+            TokenKind::Fn => {
+                // Function type: fn(A, B) -> C
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let mut param_types = Vec::new();
+                if *self.peek() != TokenKind::RParen {
+                    param_types.push(self.parse_type_expr()?);
+                    while *self.peek() == TokenKind::Comma {
+                        self.advance();
+                        param_types.push(self.parse_type_expr()?);
+                    }
+                }
+                self.expect(&TokenKind::RParen)?;
+                self.expect(&TokenKind::Arrow)?;
+                let ret = self.parse_type_expr()?;
+                let effects = if *self.peek() == TokenKind::With {
+                    self.advance();
+                    let mut effs = vec![self.parse_type_expr()?];
+                    while *self.peek() == TokenKind::Comma {
+                        self.advance();
+                        effs.push(self.parse_type_expr()?);
+                    }
+                    effs
+                } else {
+                    Vec::new()
+                };
+                Ok(TypeExpr::Function(param_types, Box::new(ret), effects))
+            }
             TokenKind::Ident(name) => {
                 // Lowercase type name (type variable or builtin alias)
                 self.advance();
@@ -484,6 +513,50 @@ impl Parser {
 
     // ---- Trait & Impl ----
 
+    /// Parse a trait method signature (body is optional; defaults to a unit literal placeholder).
+    fn parse_trait_method(&mut self) -> Result<FnDecl, ParseError> {
+        let span = self.expect(&TokenKind::Fn)?;
+        let (name, _) = self.expect_ident()?;
+        let params = self.parse_params()?;
+
+        let return_type = if *self.peek() == TokenKind::Arrow {
+            self.advance();
+            Some(self.parse_type_expr()?)
+        } else {
+            None
+        };
+
+        let effects = if *self.peek() == TokenKind::With {
+            self.advance();
+            let mut effs = vec![self.parse_type_expr()?];
+            while *self.peek() == TokenKind::Comma {
+                self.advance();
+                effs.push(self.parse_type_expr()?);
+            }
+            effs
+        } else {
+            Vec::new()
+        };
+
+        // Body is optional in trait definitions: if `=` present, parse body; otherwise use placeholder
+        let body = if *self.peek() == TokenKind::Eq {
+            self.advance();
+            self.parse_expr()?
+        } else {
+            Expr::UnitLit(span)
+        };
+
+        Ok(FnDecl {
+            public: false,
+            name,
+            params,
+            return_type,
+            effects,
+            body,
+            span,
+        })
+    }
+
     fn parse_trait_def(&mut self) -> Result<TraitDef, ParseError> {
         let span = self.expect(&TokenKind::Trait)?;
         let (name, _) = self.expect_type_ident()?;
@@ -508,7 +581,7 @@ impl Parser {
         self.expect(&TokenKind::LBrace)?;
         let mut methods = Vec::new();
         while *self.peek() != TokenKind::RBrace {
-            methods.push(self.parse_fn_decl(false)?);
+            methods.push(self.parse_trait_method()?);
         }
         self.expect(&TokenKind::RBrace)?;
 
@@ -553,7 +626,7 @@ impl Parser {
         self.expect(&TokenKind::LBrace)?;
         let mut operations = Vec::new();
         while *self.peek() != TokenKind::RBrace {
-            operations.push(self.parse_fn_decl(false)?);
+            operations.push(self.parse_effect_op()?);
         }
         self.expect(&TokenKind::RBrace)?;
 
@@ -561,6 +634,73 @@ impl Parser {
             name,
             type_params,
             operations,
+            span,
+        })
+    }
+
+    /// Parse an effect operation signature: fn name(params) -> ReturnType
+    /// Unlike regular fn decls, effect ops have no body (no `= expr`)
+    fn parse_effect_op(&mut self) -> Result<FnDecl, ParseError> {
+        let span = self.expect(&TokenKind::Fn)?;
+        let (name, _) = self.expect_ident()?;
+        let params = self.parse_params()?;
+
+        let return_type = if *self.peek() == TokenKind::Arrow {
+            self.advance();
+            Some(self.parse_type_expr()?)
+        } else {
+            None
+        };
+
+        let effects = if *self.peek() == TokenKind::With {
+            self.advance();
+            let mut effs = vec![self.parse_type_expr()?];
+            while *self.peek() == TokenKind::Comma {
+                self.advance();
+                effs.push(self.parse_type_expr()?);
+            }
+            effs
+        } else {
+            Vec::new()
+        };
+
+        // Effect operations have no body — use unit placeholder
+        Ok(FnDecl {
+            public: false,
+            name,
+            params,
+            return_type,
+            effects,
+            body: Expr::UnitLit(span),
+            span,
+        })
+    }
+
+    fn parse_vibe_decl(&mut self) -> Result<VibeDecl, ParseError> {
+        let span = self.expect(&TokenKind::Vibe)?;
+        let (name, _) = self.expect_ident()?;
+
+        let params = if *self.peek() == TokenKind::LParen {
+            self.parse_params()?
+        } else {
+            Vec::new()
+        };
+
+        let return_type = if *self.peek() == TokenKind::Arrow {
+            self.advance();
+            Some(self.parse_type_expr()?)
+        } else {
+            None
+        };
+
+        self.expect(&TokenKind::Eq)?;
+        let body = self.parse_expr()?;
+
+        Ok(VibeDecl {
+            name,
+            params,
+            return_type,
+            body,
             span,
         })
     }
@@ -812,10 +952,45 @@ impl Parser {
                 Ok(Expr::List(elems, span))
             }
 
-            // Record literal
+            // Record literal or record update: { field: val } or { base | field: val }
             TokenKind::LBrace => {
                 let span = self.span();
                 self.advance();
+
+                // Check for record update syntax: { expr | field: val, ... }
+                // We need to look ahead: if we see `ident |` it's an update
+                if let TokenKind::Ident(_) = self.peek().clone() {
+                    // Save position to backtrack if not an update
+                    let saved_pos = self.pos;
+                    let (name, _) = self.expect_ident()?;
+
+                    if *self.peek() == TokenKind::Pipe {
+                        // Record update: { base_var | field: val, ... }
+                        self.advance(); // consume '|'
+                        let base = Expr::Ident(name, span.clone());
+                        let mut updates = Vec::new();
+                        loop {
+                            if *self.peek() == TokenKind::RBrace {
+                                break;
+                            }
+                            let (field_name, _) = self.expect_ident()?;
+                            self.expect(&TokenKind::Colon)?;
+                            let value = self.parse_expr()?;
+                            updates.push((field_name, value));
+                            if *self.peek() == TokenKind::Comma {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        self.expect(&TokenKind::RBrace)?;
+                        return Ok(Expr::RecordUpdate(Box::new(base), updates, span));
+                    } else {
+                        // Not an update, backtrack and parse as normal record
+                        self.pos = saved_pos;
+                    }
+                }
+
                 let mut fields = Vec::new();
                 loop {
                     if *self.peek() == TokenKind::RBrace {
@@ -849,6 +1024,52 @@ impl Parser {
 
             // Lambda: fn(x, y) = body
             TokenKind::Fn => self.parse_lambda(),
+
+            // Handle expression: handle <expr> with <EffectName> { handlers }
+            TokenKind::Handle => self.parse_handle_expr(),
+
+            // Resume expression: resume(<expr>)
+            TokenKind::Resume => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let expr = if *self.peek() == TokenKind::RParen {
+                    Expr::UnitLit(span)
+                } else {
+                    self.parse_expr()?
+                };
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::Resume(Box::new(expr), span))
+            }
+
+            // Par expression: par(expr1, expr2, ...)
+            TokenKind::Par => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let mut exprs = vec![self.parse_expr()?];
+                while *self.peek() == TokenKind::Comma {
+                    self.advance();
+                    if *self.peek() == TokenKind::RParen {
+                        break;
+                    }
+                    exprs.push(self.parse_expr()?);
+                }
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::Par(exprs, span))
+            }
+
+            // Pmap expression: pmap(collection, function)
+            TokenKind::Pmap => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let collection = self.parse_expr()?;
+                self.expect(&TokenKind::Comma)?;
+                let func = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::Pmap(Box::new(collection), Box::new(func), span))
+            }
 
             // Backslash lambda: \x -> body
             TokenKind::Backslash => {
@@ -1044,7 +1265,8 @@ impl Parser {
     fn is_at_decl_start(&self) -> bool {
         match self.peek() {
             TokenKind::Fn | TokenKind::Type | TokenKind::Trait
-            | TokenKind::Impl | TokenKind::Effect | TokenKind::Pub => true,
+            | TokenKind::Impl | TokenKind::Effect | TokenKind::Pub
+            | TokenKind::Vibe => true,
             _ => false,
         }
     }
@@ -1083,9 +1305,71 @@ impl Parser {
         let span = self.span();
         self.expect(&TokenKind::Fn)?;
         let params = self.parse_params()?;
+        // Optional return type annotation: -> Type
+        if *self.peek() == TokenKind::Arrow {
+            self.advance();
+            let _ret_type = self.parse_type_expr()?;
+        }
         self.expect(&TokenKind::Eq)?;
         let body = self.parse_expr()?;
         Ok(Expr::Lambda(params, Box::new(body), span))
+    }
+
+    /// Parse: handle <expr> with <EffectName>[<TypeArgs>] { op(params) -> body, ... }
+    fn parse_handle_expr(&mut self) -> Result<Expr, ParseError> {
+        let span = self.span();
+        self.expect(&TokenKind::Handle)?;
+        let body = self.parse_expr()?;
+
+        let mut handlers = Vec::new();
+
+        // Parse one or more `with Effect { handlers }` clauses
+        while *self.peek() == TokenKind::With {
+            self.advance();
+            let (effect_name, _) = self.expect_type_ident()?;
+
+            // Optional type arguments [A, B, ...]
+            if *self.peek() == TokenKind::LBracket {
+                self.advance();
+                while *self.peek() != TokenKind::RBracket {
+                    self.parse_type_expr()?; // consume but we don't use type args in handlers yet
+                    if *self.peek() == TokenKind::Comma {
+                        self.advance();
+                    }
+                }
+                self.expect(&TokenKind::RBracket)?;
+            }
+
+            self.expect(&TokenKind::LBrace)?;
+
+            while *self.peek() != TokenKind::RBrace {
+                let (op_name, _) = self.expect_ident()?;
+                self.expect(&TokenKind::LParen)?;
+                let mut params = Vec::new();
+                if *self.peek() != TokenKind::RParen {
+                    let (pname, _) = self.expect_ident()?;
+                    params.push(pname);
+                    while *self.peek() == TokenKind::Comma {
+                        self.advance();
+                        let (pname, _) = self.expect_ident()?;
+                        params.push(pname);
+                    }
+                }
+                self.expect(&TokenKind::RParen)?;
+                self.expect(&TokenKind::Arrow)?;
+                let handler_body = self.parse_expr()?;
+
+                handlers.push(Handler {
+                    effect_name: effect_name.clone(),
+                    operation: op_name,
+                    params,
+                    body: handler_body,
+                });
+            }
+            self.expect(&TokenKind::RBrace)?;
+        }
+
+        Ok(Expr::Handle(Box::new(body), handlers, span))
     }
 }
 
@@ -1178,6 +1462,51 @@ mod tests {
                 other => panic!("expected match, got {other:?}"),
             },
             _ => panic!("expected function"),
+        }
+    }
+
+    #[test]
+    fn test_trait_def() {
+        let m = parse_str("module main\ntrait Show {\n    fn show(x: Int) -> Int\n}");
+        assert_eq!(m.declarations.len(), 1);
+        match &m.declarations[0] {
+            Decl::TraitDef(t) => {
+                assert_eq!(t.name, "Show");
+                assert_eq!(t.methods.len(), 1);
+                assert_eq!(t.methods[0].name, "show");
+                assert_eq!(t.methods[0].params.len(), 1);
+            }
+            _ => panic!("expected trait def"),
+        }
+    }
+
+    #[test]
+    fn test_impl_block() {
+        let m = parse_str(
+            "module main\ntrait Eq {\n    fn eq(a: Int, b: Int) -> Int\n}\nimpl Eq for Int {\n    fn eq(a: Int, b: Int) -> Int = a\n}"
+        );
+        assert_eq!(m.declarations.len(), 2);
+        match &m.declarations[1] {
+            Decl::ImplBlock(ib) => {
+                assert_eq!(ib.trait_name, "Eq");
+                assert_eq!(ib.methods.len(), 1);
+                assert_eq!(ib.methods[0].name, "eq");
+            }
+            _ => panic!("expected impl block"),
+        }
+    }
+
+    #[test]
+    fn test_trait_with_requires() {
+        let m = parse_str(
+            "module main\ntrait Ord requires Eq {\n    fn compare(a: Int, b: Int) -> Int\n}"
+        );
+        match &m.declarations[0] {
+            Decl::TraitDef(t) => {
+                assert_eq!(t.name, "Ord");
+                assert_eq!(t.requires.len(), 1);
+            }
+            _ => panic!("expected trait def"),
         }
     }
 }

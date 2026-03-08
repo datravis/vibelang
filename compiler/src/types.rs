@@ -89,6 +89,14 @@ impl std::fmt::Display for Type {
 struct TypeChecker {
     env: Vec<HashMap<String, Type>>,
     type_defs: HashMap<String, TypeDef>,
+    /// Effect definitions: effect_name -> list of (operation_name, param_types, return_type)
+    effect_defs: HashMap<String, Vec<(String, Vec<Type>, Type)>>,
+    /// All effect operation names -> (effect_name, param_types, return_type)
+    effect_ops: HashMap<String, (String, Vec<Type>, Type)>,
+    /// Trait definitions: trait_name -> list of (method_name, param_types, return_type)
+    trait_defs: HashMap<String, Vec<(String, Vec<Type>, Type)>>,
+    /// Trait implementations: (trait_name, target_type) -> list of method names
+    trait_impls: HashMap<(String, String), Vec<String>>,
     next_var: usize,
 }
 
@@ -115,9 +123,85 @@ impl TypeChecker {
             Type::Fn(vec![Type::Unknown], Box::new(Type::Unknown)),
         );
 
+        // List operations (used with pipe operator: list |> map(f) |> filter(p) |> fold(init, f))
+        let list_t = Type::List(Box::new(Type::Unknown));
+        let fn_t = Type::Fn(vec![Type::Unknown], Box::new(Type::Unknown));
+        env.insert(
+            "map".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(list_t.clone())),
+        );
+        env.insert(
+            "filter".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(list_t.clone())),
+        );
+        env.insert(
+            "fold".into(),
+            Type::Fn(vec![Type::Unknown, fn_t.clone()], Box::new(Type::Unknown)),
+        );
+        env.insert(
+            "for_each".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(Type::Unit)),
+        );
+        env.insert(
+            "count".into(),
+            Type::Fn(vec![list_t.clone()], Box::new(Type::Int)),
+        );
+        env.insert(
+            "length".into(),
+            Type::Fn(vec![list_t.clone()], Box::new(Type::Int)),
+        );
+        env.insert(
+            "take".into(),
+            Type::Fn(vec![Type::Int], Box::new(list_t.clone())),
+        );
+        env.insert(
+            "drop".into(),
+            Type::Fn(vec![Type::Int], Box::new(list_t.clone())),
+        );
+        env.insert(
+            "take_while".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(list_t.clone())),
+        );
+        env.insert(
+            "drop_while".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(list_t.clone())),
+        );
+        env.insert(
+            "any".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(Type::Bool)),
+        );
+        env.insert(
+            "all".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(Type::Bool)),
+        );
+        env.insert(
+            "reduce".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(Type::Unknown)),
+        );
+        env.insert(
+            "flat_map".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(list_t.clone())),
+        );
+        env.insert(
+            "first".into(),
+            Type::Fn(vec![], Box::new(Type::Unknown)),
+        );
+        env.insert(
+            "last".into(),
+            Type::Fn(vec![], Box::new(Type::Unknown)),
+        );
+        env.insert(
+            "inspect".into(),
+            Type::Fn(vec![fn_t.clone()], Box::new(list_t)),
+        );
+
         Self {
             env: vec![env],
             type_defs: HashMap::new(),
+            effect_defs: HashMap::new(),
+            effect_ops: HashMap::new(),
+            trait_defs: HashMap::new(),
+            trait_impls: HashMap::new(),
             next_var: 0,
         }
     }
@@ -367,9 +451,45 @@ impl TypeChecker {
                 Ok(Type::Unit)
             }
 
-            Expr::Handle(expr, _handlers, _) => self.check_expr(expr),
+            Expr::Handle(expr, handlers, _) => {
+                let result = self.check_expr(expr)?;
+                for handler in handlers {
+                    self.push_scope();
+                    for param in &handler.params {
+                        self.define(param.clone(), Type::Unknown);
+                    }
+                    self.check_expr(&handler.body)?;
+                    self.pop_scope();
+                }
+                Ok(result)
+            }
 
             Expr::Resume(expr, _) => self.check_expr(expr),
+
+            Expr::Perform(_effect, _op, args, _) => {
+                for arg in args {
+                    self.check_expr(arg)?;
+                }
+                Ok(Type::Unknown)
+            }
+
+            Expr::Par(exprs, _) => {
+                let mut types = Vec::new();
+                for expr in exprs {
+                    types.push(self.check_expr(expr)?);
+                }
+                Ok(Type::Tuple(types))
+            }
+
+            Expr::Pmap(collection, func, _) => {
+                let col_type = self.check_expr(collection)?;
+                self.check_expr(func)?;
+                Ok(col_type)
+            }
+
+            Expr::VibePipeline(source, _stages, _) => {
+                self.check_expr(source)
+            }
         }
     }
 
@@ -459,6 +579,109 @@ pub fn check(module: &Module) -> Result<(), TypeError> {
         }
     }
 
+    // Register trait definitions and bring trait methods into scope
+    for decl in &module.declarations {
+        if let Decl::TraitDef(td) = decl {
+            let mut methods = Vec::new();
+            for m in &td.methods {
+                let param_types: Vec<Type> = m
+                    .params
+                    .iter()
+                    .map(|p| {
+                        p.type_ann
+                            .as_ref()
+                            .map(|ta| checker.resolve_type_expr(ta))
+                            .unwrap_or(Type::Unknown)
+                    })
+                    .collect();
+                let ret = m
+                    .return_type
+                    .as_ref()
+                    .map(|r| checker.resolve_type_expr(r))
+                    .unwrap_or(Type::Unknown);
+                methods.push((m.name.clone(), param_types.clone(), ret.clone()));
+                // Register trait methods as callable functions
+                checker.define(
+                    m.name.clone(),
+                    Type::Fn(param_types, Box::new(ret)),
+                );
+            }
+            checker.trait_defs.insert(td.name.clone(), methods);
+        }
+    }
+
+    // Register trait implementations
+    for decl in &module.declarations {
+        if let Decl::ImplBlock(ib) = decl {
+            let target_name = match &ib.target {
+                TypeExpr::Named(name, _) => name.clone(),
+                _ => "Unknown".to_string(),
+            };
+            let method_names: Vec<String> = ib.methods.iter().map(|m| m.name.clone()).collect();
+            checker.trait_impls.insert(
+                (ib.trait_name.clone(), target_name),
+                method_names,
+            );
+            // Register impl methods as functions (with their concrete types)
+            for m in &ib.methods {
+                let param_types: Vec<Type> = m
+                    .params
+                    .iter()
+                    .map(|p| {
+                        p.type_ann
+                            .as_ref()
+                            .map(|ta| checker.resolve_type_expr(ta))
+                            .unwrap_or(Type::Unknown)
+                    })
+                    .collect();
+                let ret = m
+                    .return_type
+                    .as_ref()
+                    .map(|r| checker.resolve_type_expr(r))
+                    .unwrap_or(Type::Unknown);
+                checker.define(
+                    m.name.clone(),
+                    Type::Fn(param_types, Box::new(ret)),
+                );
+            }
+        }
+    }
+
+    // Register effect definitions and bring operations into scope
+    for decl in &module.declarations {
+        if let Decl::EffectDef(ed) = decl {
+            let mut ops = Vec::new();
+            for op in &ed.operations {
+                let param_types: Vec<Type> = op
+                    .params
+                    .iter()
+                    .map(|p| {
+                        p.type_ann
+                            .as_ref()
+                            .map(|ta| checker.resolve_type_expr(ta))
+                            .unwrap_or(Type::Unknown)
+                    })
+                    .collect();
+                let ret = op
+                    .return_type
+                    .as_ref()
+                    .map(|r| checker.resolve_type_expr(r))
+                    .unwrap_or(Type::Unknown);
+                ops.push((op.name.clone(), param_types.clone(), ret.clone()));
+                checker.effect_ops.insert(
+                    op.name.clone(),
+                    (ed.name.clone(), param_types.clone(), ret.clone()),
+                );
+                // Register effect operations as callable functions
+                checker.define(
+                    op.name.clone(),
+                    Type::Fn(param_types, Box::new(ret)),
+                );
+            }
+            checker.effect_defs.insert(ed.name.clone(), ops);
+        }
+    }
+
     // Second pass: register all function signatures
     for decl in &module.declarations {
         if let Decl::Function(f) = decl {
@@ -481,10 +704,51 @@ pub fn check(module: &Module) -> Result<(), TypeError> {
         }
     }
 
-    // Third pass: check function bodies
+    // Register vibe declarations as functions
     for decl in &module.declarations {
-        if let Decl::Function(f) = decl {
-            checker.check_fn_decl(f)?;
+        if let Decl::VibeDecl(v) = decl {
+            let param_types: Vec<Type> = v
+                .params
+                .iter()
+                .map(|p| {
+                    p.type_ann
+                        .as_ref()
+                        .map(|ta| checker.resolve_type_expr(ta))
+                        .unwrap_or(Type::Unknown)
+                })
+                .collect();
+            let ret = v
+                .return_type
+                .as_ref()
+                .map(|r| checker.resolve_type_expr(r))
+                .unwrap_or(Type::Unknown);
+            checker.define(v.name.clone(), Type::Fn(param_types, Box::new(ret)));
+        }
+    }
+
+    // Third pass: check function bodies (including impl block methods)
+    for decl in &module.declarations {
+        match decl {
+            Decl::Function(f) => checker.check_fn_decl(f)?,
+            Decl::VibeDecl(v) => {
+                // Type check vibe body like a function
+                let fn_decl = FnDecl {
+                    public: false,
+                    name: v.name.clone(),
+                    params: v.params.clone(),
+                    return_type: v.return_type.clone(),
+                    effects: Vec::new(),
+                    body: v.body.clone(),
+                    span: v.span,
+                };
+                checker.check_fn_decl(&fn_decl)?;
+            }
+            Decl::ImplBlock(ib) => {
+                for method in &ib.methods {
+                    checker.check_fn_decl(method)?;
+                }
+            }
+            _ => {}
         }
     }
 

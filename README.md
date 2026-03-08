@@ -252,6 +252,11 @@ See the [`examples/`](examples/) directory:
 - [`factorial.vibe`](examples/factorial.vibe) — Factorial with iterative loop
 - [`pipeline.vibe`](examples/pipeline.vibe) — Pipeline operator with function chaining
 - [`types.vibe`](examples/types.vibe) — Algebraic types and pattern matching
+- [`records.vibe`](examples/records.vibe) — Record types with field access
+- [`variants.vibe`](examples/variants.vibe) — Sum types with constructor pattern matching
+- [`tuples.vibe`](examples/tuples.vibe) — Tuple allocation
+- [`lists.vibe`](examples/lists.vibe) — List literals
+- [`memory.vibe`](examples/memory.vibe) — Region-based memory management
 
 ## Language Comparison
 
@@ -314,7 +319,8 @@ vibelang/
 │       ├── parser.rs   Parser -> AST
 │       ├── ast.rs      AST definitions
 │       ├── types.rs    Type checker
-│       └── codegen.rs  LLVM IR generation + optimization
+│       ├── codegen.rs  LLVM IR generation + optimization
+│       └── memory.rs   Memory management (regions, refcounting, escape analysis)
 ├── examples/           Example VibeLang programs
 ├── benchmarks/         Performance benchmarks vs Rust/Go/Python
 │   ├── bench.sh        Benchmark runner
@@ -336,6 +342,6 @@ VibeLang is in active development. The compiler supports:
 - [x] JIT execution
 - [x] Cross-compilation (macOS ARM, Linux x86-64, Windows x86-64)
 - [ ] Standard library
-- [ ] Memory management (regions + refcounting)
+- [x] Memory management (regions + refcounting)
 - [ ] Effect system
 - [ ] Concurrency primitives
