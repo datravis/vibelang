@@ -168,14 +168,9 @@ impl Parser {
             } else if *self.peek() == TokenKind::LBrace {
                 self.advance();
                 let mut names = Vec::new();
-                loop {
-                    match self.peek().clone() {
-                        TokenKind::Ident(n) | TokenKind::TypeIdent(n) => {
-                            self.advance();
-                            names.push(n);
-                        }
-                        _ => break,
-                    }
+                while let TokenKind::Ident(n) | TokenKind::TypeIdent(n) = self.peek().clone() {
+                    self.advance();
+                    names.push(n);
                     if *self.peek() == TokenKind::Comma {
                         self.advance();
                     } else {
@@ -967,7 +962,7 @@ impl Parser {
                     if *self.peek() == TokenKind::Pipe {
                         // Record update: { base_var | field: val, ... }
                         self.advance(); // consume '|'
-                        let base = Expr::Ident(name, span.clone());
+                        let base = Expr::Ident(name, span);
                         let mut updates = Vec::new();
                         loop {
                             if *self.peek() == TokenKind::RBrace {
@@ -1069,6 +1064,70 @@ impl Parser {
                 let func = self.parse_expr()?;
                 self.expect(&TokenKind::RParen)?;
                 Ok(Expr::Pmap(Box::new(collection), Box::new(func), span))
+            }
+
+            // Pfilter expression: pfilter(collection, predicate)
+            TokenKind::Pfilter => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let collection = self.parse_expr()?;
+                self.expect(&TokenKind::Comma)?;
+                let func = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::Pfilter(Box::new(collection), Box::new(func), span))
+            }
+
+            // Preduce expression: preduce(collection, init, function)
+            TokenKind::Preduce => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let collection = self.parse_expr()?;
+                self.expect(&TokenKind::Comma)?;
+                let init = self.parse_expr()?;
+                self.expect(&TokenKind::Comma)?;
+                let func = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::Preduce(Box::new(collection), Box::new(init), Box::new(func), span))
+            }
+
+            // Race expression: race(expr1, expr2, ...)
+            TokenKind::Race => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let mut exprs = vec![self.parse_expr()?];
+                while *self.peek() == TokenKind::Comma {
+                    self.advance();
+                    if *self.peek() == TokenKind::RParen {
+                        break;
+                    }
+                    exprs.push(self.parse_expr()?);
+                }
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::Race(exprs, span))
+            }
+
+            // Channel operations
+            TokenKind::SendChan => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let channel = self.parse_expr()?;
+                self.expect(&TokenKind::Comma)?;
+                let value = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::ChanSend(Box::new(channel), Box::new(value), span))
+            }
+
+            TokenKind::Recv => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let channel = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::ChanRecv(Box::new(channel), span))
             }
 
             // Backslash lambda: \x -> body
@@ -1263,12 +1322,10 @@ impl Parser {
     }
 
     fn is_at_decl_start(&self) -> bool {
-        match self.peek() {
+        matches!(self.peek(),
             TokenKind::Fn | TokenKind::Type | TokenKind::Trait
             | TokenKind::Impl | TokenKind::Effect | TokenKind::Pub
-            | TokenKind::Vibe => true,
-            _ => false,
-        }
+            | TokenKind::Vibe)
     }
 
     fn parse_let_expr(&mut self) -> Result<Expr, ParseError> {

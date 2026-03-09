@@ -431,6 +431,268 @@ vibe_cons_t *vibe_pmap_list(vibe_cons_t *list, vibe_map_fn fn, void *region_ptr)
 }
 
 /* ============================================================
+ * Pfilter Combinator
+ * ============================================================ */
+
+typedef struct {
+    int64_t    *src;
+    int64_t    *flags;
+    int         start;
+    int         count;
+    vibe_pred_fn pred;
+} pfilter_chunk_t;
+
+static void *pfilter_chunk_worker(void *arg) {
+    pfilter_chunk_t *chunk = (pfilter_chunk_t *)arg;
+    for (int i = 0; i < chunk->count; i++) {
+        int idx = chunk->start + i;
+        chunk->flags[idx] = chunk->pred(chunk->src[idx]) ? 1 : 0;
+    }
+    return NULL;
+}
+
+vibe_cons_t *vibe_pfilter_list(vibe_cons_t *list, vibe_pred_fn pred, void *region_ptr) {
+    if (!list) return NULL;
+
+    ensure_init();
+
+    int64_t n = vibe_list_count(list);
+    if (n == 0) return NULL;
+
+    int64_t *src = (int64_t *)malloc(n * sizeof(int64_t));
+    int64_t *flags = (int64_t *)calloc(n, sizeof(int64_t));
+
+    vibe_cons_t *cur = list;
+    for (int64_t i = 0; i < n; i++) {
+        src[i] = cur->value;
+        cur = cur->next;
+    }
+
+    int num_workers = g_pool.num_workers;
+    if (num_workers <= 0) num_workers = 1;
+
+    if (n <= 64 || num_workers == 1) {
+        for (int64_t i = 0; i < n; i++) {
+            flags[i] = pred(src[i]) ? 1 : 0;
+        }
+    } else {
+        int num_chunks = num_workers;
+        if (num_chunks > (int)n) num_chunks = (int)n;
+        int chunk_size = (int)(n / num_chunks);
+        int remainder = (int)(n % num_chunks);
+
+        pfilter_chunk_t *chunks = (pfilter_chunk_t *)malloc(num_chunks * sizeof(pfilter_chunk_t));
+        pthread_t *threads = (pthread_t *)malloc((num_chunks - 1) * sizeof(pthread_t));
+
+        int offset = 0;
+        for (int c = 0; c < num_chunks; c++) {
+            int this_size = chunk_size + (c < remainder ? 1 : 0);
+            chunks[c].src = src;
+            chunks[c].flags = flags;
+            chunks[c].start = offset;
+            chunks[c].count = this_size;
+            chunks[c].pred = pred;
+            offset += this_size;
+        }
+
+        for (int c = 0; c < num_chunks - 1; c++) {
+            pthread_create(&threads[c], NULL, pfilter_chunk_worker, &chunks[c]);
+        }
+        pfilter_chunk_worker(&chunks[num_chunks - 1]);
+
+        for (int c = 0; c < num_chunks - 1; c++) {
+            pthread_join(threads[c], NULL);
+        }
+
+        free(threads);
+        free(chunks);
+    }
+
+    vibe_cons_t *result = NULL;
+    for (int64_t i = n - 1; i >= 0; i--) {
+        if (flags[i]) {
+            vibe_cons_t *cell = (vibe_cons_t *)malloc(sizeof(vibe_cons_t));
+            cell->value = src[i];
+            cell->next = result;
+            result = cell;
+        }
+    }
+
+    free(src);
+    free(flags);
+    return result;
+}
+
+/* ============================================================
+ * Preduce Combinator — Parallel Tree Reduction
+ * ============================================================ */
+
+typedef struct {
+    int64_t       *data;
+    int            start;
+    int            count;
+    vibe_reduce_fn fn;
+    int64_t        result;
+} preduce_chunk_t;
+
+static void *preduce_chunk_worker(void *arg) {
+    preduce_chunk_t *chunk = (preduce_chunk_t *)arg;
+    int64_t acc = chunk->data[chunk->start];
+    for (int i = 1; i < chunk->count; i++) {
+        acc = chunk->fn(acc, chunk->data[chunk->start + i]);
+    }
+    chunk->result = acc;
+    return NULL;
+}
+
+int64_t vibe_preduce_list(vibe_cons_t *list, int64_t init, vibe_reduce_fn fn) {
+    if (!list) return init;
+
+    ensure_init();
+
+    int64_t n = vibe_list_count(list);
+    if (n == 0) return init;
+
+    int64_t *data = (int64_t *)malloc(n * sizeof(int64_t));
+    vibe_cons_t *cur = list;
+    for (int64_t i = 0; i < n; i++) {
+        data[i] = cur->value;
+        cur = cur->next;
+    }
+
+    int num_workers = g_pool.num_workers;
+    if (num_workers <= 0) num_workers = 1;
+
+    if (n <= 64 || num_workers == 1) {
+        int64_t acc = init;
+        for (int64_t i = 0; i < n; i++) {
+            acc = fn(acc, data[i]);
+        }
+        free(data);
+        return acc;
+    }
+
+    int num_chunks = num_workers;
+    if (num_chunks > (int)n) num_chunks = (int)n;
+    int chunk_size = (int)(n / num_chunks);
+    int remainder = (int)(n % num_chunks);
+
+    preduce_chunk_t *chunks = (preduce_chunk_t *)malloc(num_chunks * sizeof(preduce_chunk_t));
+    pthread_t *threads = (pthread_t *)malloc((num_chunks - 1) * sizeof(pthread_t));
+
+    int offset = 0;
+    for (int c = 0; c < num_chunks; c++) {
+        int this_size = chunk_size + (c < remainder ? 1 : 0);
+        chunks[c].data = data;
+        chunks[c].start = offset;
+        chunks[c].count = this_size;
+        chunks[c].fn = fn;
+        chunks[c].result = 0;
+        offset += this_size;
+    }
+
+    for (int c = 0; c < num_chunks - 1; c++) {
+        pthread_create(&threads[c], NULL, preduce_chunk_worker, &chunks[c]);
+    }
+    preduce_chunk_worker(&chunks[num_chunks - 1]);
+
+    for (int c = 0; c < num_chunks - 1; c++) {
+        pthread_join(threads[c], NULL);
+    }
+
+    int64_t final_result = init;
+    for (int c = 0; c < num_chunks; c++) {
+        final_result = fn(final_result, chunks[c].result);
+    }
+
+    free(threads);
+    free(chunks);
+    free(data);
+    return final_result;
+}
+
+/* ============================================================
+ * Channels — Bounded MPMC Queue
+ * ============================================================ */
+
+struct vibe_channel {
+    int64_t         *buffer;
+    int              capacity;
+    int              head;
+    int              tail;
+    int              count;
+    int              closed;
+    pthread_mutex_t  lock;
+    pthread_cond_t   not_full;
+    pthread_cond_t   not_empty;
+};
+
+vibe_channel_t *vibe_channel_create(int64_t capacity) {
+    if (capacity <= 0) capacity = 1;
+    vibe_channel_t *ch = (vibe_channel_t *)malloc(sizeof(vibe_channel_t));
+    ch->buffer = (int64_t *)malloc(capacity * sizeof(int64_t));
+    ch->capacity = (int)capacity;
+    ch->head = 0;
+    ch->tail = 0;
+    ch->count = 0;
+    ch->closed = 0;
+    pthread_mutex_init(&ch->lock, NULL);
+    pthread_cond_init(&ch->not_full, NULL);
+    pthread_cond_init(&ch->not_empty, NULL);
+    return ch;
+}
+
+void vibe_channel_send(vibe_channel_t *ch, int64_t value) {
+    pthread_mutex_lock(&ch->lock);
+    while (ch->count == ch->capacity && !ch->closed) {
+        pthread_cond_wait(&ch->not_full, &ch->lock);
+    }
+    if (ch->closed) {
+        pthread_mutex_unlock(&ch->lock);
+        return;
+    }
+    ch->buffer[ch->tail] = value;
+    ch->tail = (ch->tail + 1) % ch->capacity;
+    ch->count++;
+    pthread_cond_signal(&ch->not_empty);
+    pthread_mutex_unlock(&ch->lock);
+}
+
+int64_t vibe_channel_recv(vibe_channel_t *ch) {
+    pthread_mutex_lock(&ch->lock);
+    while (ch->count == 0 && !ch->closed) {
+        pthread_cond_wait(&ch->not_empty, &ch->lock);
+    }
+    if (ch->count == 0 && ch->closed) {
+        pthread_mutex_unlock(&ch->lock);
+        return 0;
+    }
+    int64_t value = ch->buffer[ch->head];
+    ch->head = (ch->head + 1) % ch->capacity;
+    ch->count--;
+    pthread_cond_signal(&ch->not_full);
+    pthread_mutex_unlock(&ch->lock);
+    return value;
+}
+
+void vibe_channel_close(vibe_channel_t *ch) {
+    pthread_mutex_lock(&ch->lock);
+    ch->closed = 1;
+    pthread_cond_broadcast(&ch->not_full);
+    pthread_cond_broadcast(&ch->not_empty);
+    pthread_mutex_unlock(&ch->lock);
+}
+
+void vibe_channel_destroy(vibe_channel_t *ch) {
+    if (!ch) return;
+    pthread_mutex_destroy(&ch->lock);
+    pthread_cond_destroy(&ch->not_full);
+    pthread_cond_destroy(&ch->not_empty);
+    free(ch->buffer);
+    free(ch);
+}
+
+/* ============================================================
  * Race Combinator
  * ============================================================ */
 

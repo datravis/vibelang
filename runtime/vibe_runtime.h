@@ -59,6 +59,32 @@ vibe_cons_t *vibe_pmap_list(vibe_cons_t *list, vibe_map_fn fn, void *region_ptr)
  * Remaining thunks are cancelled (best-effort). */
 int64_t vibe_race_execute(vibe_thunk_fn *thunks, int n);
 
+/* --- Pfilter Combinator --- */
+
+/* A predicate function takes an i64 and returns non-zero for true. */
+typedef int64_t (*vibe_pred_fn)(int64_t);
+
+/* A reduce function takes two i64 values and returns one. */
+typedef int64_t (*vibe_reduce_fn)(int64_t, int64_t);
+
+/* Parallel filter: keep elements where pred returns non-zero. */
+vibe_cons_t *vibe_pfilter_list(vibe_cons_t *list, vibe_pred_fn pred, void *region_ptr);
+
+/* --- Preduce Combinator --- */
+
+/* Parallel reduce via tree reduction. Function must be associative. */
+int64_t vibe_preduce_list(vibe_cons_t *list, int64_t init, vibe_reduce_fn fn);
+
+/* --- Channels --- */
+
+typedef struct vibe_channel vibe_channel_t;
+
+vibe_channel_t *vibe_channel_create(int64_t capacity);
+void vibe_channel_send(vibe_channel_t *ch, int64_t value);
+int64_t vibe_channel_recv(vibe_channel_t *ch);
+void vibe_channel_close(vibe_channel_t *ch);
+void vibe_channel_destroy(vibe_channel_t *ch);
+
 #ifdef __cplusplus
 }
 #endif

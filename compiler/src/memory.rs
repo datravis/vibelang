@@ -257,15 +257,34 @@ impl EscapeAnalyzer {
                 }
             }
 
-            Expr::Par(exprs, _) => {
+            Expr::Par(exprs, _) | Expr::Race(exprs, _) => {
                 for e in exprs {
                     self.analyze_expr(e, false);
                 }
             }
 
-            Expr::Pmap(collection, func, _) => {
+            Expr::Pmap(collection, func, _) | Expr::Pfilter(collection, func, _) => {
                 self.analyze_expr(collection, false);
                 self.analyze_expr(func, false);
+            }
+
+            Expr::Preduce(collection, init, func, _) => {
+                self.analyze_expr(collection, false);
+                self.analyze_expr(init, false);
+                self.analyze_expr(func, false);
+            }
+
+            Expr::ChanCreate(cap, _) => {
+                self.analyze_expr(cap, false);
+            }
+
+            Expr::ChanSend(ch, val, _) => {
+                self.analyze_expr(ch, false);
+                self.analyze_expr(val, false);
+            }
+
+            Expr::ChanRecv(ch, _) => {
+                self.analyze_expr(ch, false);
             }
 
             Expr::VibePipeline(source, stages, _) => {

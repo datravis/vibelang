@@ -1264,6 +1264,28 @@ impl<'ctx> Codegen<'ctx> {
                         return self.compile_print(args, function);
                     }
 
+                    // create_channel(capacity) -> channel ptr
+                    if name == "create_channel" && args.len() == 1 {
+                        return self.compile_chan_create(&args[0], function);
+                    }
+
+                    // close(channel) -> unit
+                    if name == "close" && args.len() == 1 {
+                        let ch_val = self.compile_expr(&args[0], function)?.unwrap();
+                        let ch_ptr = if ch_val.is_pointer_value() {
+                            ch_val.into_pointer_value()
+                        } else {
+                            let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                            self.builder.build_int_to_ptr(ch_val.into_int_value(), ptr_ty, "ch_ptr")
+                                .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                        };
+                        let close_fn = self.functions["vibe_channel_close"];
+                        self.builder.build_call(close_fn, &[ch_ptr.into()], "")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        let i64_ty = self.context.i64_type();
+                        return Ok(Some(i64_ty.const_int(0, false).into()));
+                    }
+
                     // Check if this is an effect operation call
                     if let Some((effect_name, _op_idx, _param_count)) = self.effect_ops.get(name).cloned() {
                         return self.compile_perform(&effect_name, name, args, function);
@@ -1571,7 +1593,7 @@ impl<'ctx> Codegen<'ctx> {
                 for (val, bb) in &phi_incoming {
                     if first_val.is_pointer_value() {
                         // All values must be pointers
-                        phi.add_incoming(&[(&*val, *bb)]);
+                        phi.add_incoming(&[(val, *bb)]);
                     } else {
                         let coerced = self.ensure_i64(*val);
                         phi.add_incoming(&[(&coerced, *bb)]);
@@ -1593,7 +1615,7 @@ impl<'ctx> Codegen<'ctx> {
             Expr::Let(pattern, _, value, body, _) => {
                 let val = self.compile_expr(value, function)?.unwrap();
                 self.push_scope();
-                self.bind_pattern_val(&pattern, val);
+                self.bind_pattern_val(pattern, val);
                 let result = self.compile_expr(body, function)?;
                 self.pop_scope();
                 Ok(result)
@@ -1601,7 +1623,7 @@ impl<'ctx> Codegen<'ctx> {
 
             Expr::LetBind(pattern, _, value, _) => {
                 let val = self.compile_expr(value, function)?.unwrap();
-                self.bind_pattern_val(&pattern, val);
+                self.bind_pattern_val(pattern, val);
                 Ok(Some(self.context.i64_type().const_int(0, false).into()))
             }
 
@@ -1919,6 +1941,30 @@ impl<'ctx> Codegen<'ctx> {
                 self.compile_pmap(collection, func, function)
             }
 
+            Expr::Pfilter(collection, func, _) => {
+                self.compile_pfilter(collection, func, function)
+            }
+
+            Expr::Preduce(collection, init, func, _) => {
+                self.compile_preduce(collection, init, func, function)
+            }
+
+            Expr::Race(exprs, _) => {
+                self.compile_race(exprs, function)
+            }
+
+            Expr::ChanCreate(capacity, _) => {
+                self.compile_chan_create(capacity, function)
+            }
+
+            Expr::ChanSend(channel, value, _) => {
+                self.compile_chan_send(channel, value, function)
+            }
+
+            Expr::ChanRecv(channel, _) => {
+                self.compile_chan_recv(channel, function)
+            }
+
             Expr::VibePipeline(source, stages, _) => {
                 self.compile_vibe_pipeline(source, stages, function)
             }
@@ -1958,7 +2004,8 @@ impl<'ctx> Codegen<'ctx> {
             Expr::FieldAccess(base, _, _) => {
                 Self::collect_free_vars(base, bound, free);
             }
-            Expr::BinOp(l, _, r, _) | Expr::Pipe(l, r, _) | Expr::Pmap(l, r, _) => {
+            Expr::BinOp(l, _, r, _) | Expr::Pipe(l, r, _) | Expr::Pmap(l, r, _)
+            | Expr::Pfilter(l, r, _) | Expr::ChanSend(l, r, _) => {
                 Self::collect_free_vars(l, bound, free);
                 Self::collect_free_vars(r, bound, free);
             }
@@ -2021,10 +2068,21 @@ impl<'ctx> Codegen<'ctx> {
                     Self::collect_free_vars(a, bound, free);
                 }
             }
-            Expr::Par(exprs, _) => {
+            Expr::Par(exprs, _) | Expr::Race(exprs, _) => {
                 for e in exprs {
                     Self::collect_free_vars(e, bound, free);
                 }
+            }
+            Expr::Preduce(col, init, func, _) => {
+                Self::collect_free_vars(col, bound, free);
+                Self::collect_free_vars(init, bound, free);
+                Self::collect_free_vars(func, bound, free);
+            }
+            Expr::ChanCreate(cap, _) => {
+                Self::collect_free_vars(cap, bound, free);
+            }
+            Expr::ChanRecv(ch, _) => {
+                Self::collect_free_vars(ch, bound, free);
             }
             Expr::VibePipeline(source, stages, _) => {
                 Self::collect_free_vars(source, bound, free);
@@ -2083,7 +2141,7 @@ impl<'ctx> Codegen<'ctx> {
         &mut self,
         params: &[Param],
         body: &Expr,
-        function: FunctionValue<'ctx>,
+        _function: FunctionValue<'ctx>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
         let i64_ty = self.context.i64_type();
         let ptr_ty = self.context.ptr_type(AddressSpace::default());
@@ -2141,7 +2199,7 @@ impl<'ctx> Codegen<'ctx> {
                     .build_struct_gep(env_struct_ty, env_ptr, i as u32, &format!("env.{}", name))
                     .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 let loaded = self.builder
-                    .build_load(i64_ty, field_ptr, &name)
+                    .build_load(i64_ty, field_ptr, name)
                     .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 self.set_var(name.clone(), loaded);
             }
@@ -2694,7 +2752,7 @@ impl<'ctx> Codegen<'ctx> {
         let base_ptr = base_val.into_pointer_value();
 
         // Try to match against known record types
-        for (_type_name, (struct_ty, field_names)) in &self.record_types.clone() {
+        for (struct_ty, field_names) in self.record_types.clone().values() {
             if let Some(idx) = field_names.iter().position(|n| n == field) {
                 let field_ptr = self.builder.build_struct_gep(*struct_ty, base_ptr, idx as u32, &format!("field.{field}"))
                     .map_err(|e| CodegenError::Llvm(e.to_string()))?;
@@ -3242,6 +3300,47 @@ impl<'ctx> Codegen<'ctx> {
         let race_fn = self.llvm_module.add_function("vibe_race_execute", race_ty, None);
         self.functions.insert("vibe_race_execute".into(), race_fn);
 
+        // vibe_pfilter_list(list: ptr, fn: ptr, region: ptr) -> ptr
+        let pfilter_ty = ptr_ty.fn_type(
+            &[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()],
+            false,
+        );
+        let pfilter_fn = self.llvm_module.add_function("vibe_pfilter_list", pfilter_ty, None);
+        self.functions.insert("vibe_pfilter_list".into(), pfilter_fn);
+
+        // vibe_preduce_list(list: ptr, init: i64, fn: ptr) -> i64
+        let preduce_ty = i64_ty.fn_type(
+            &[ptr_ty.into(), i64_ty.into(), ptr_ty.into()],
+            false,
+        );
+        let preduce_fn = self.llvm_module.add_function("vibe_preduce_list", preduce_ty, None);
+        self.functions.insert("vibe_preduce_list".into(), preduce_fn);
+
+        // vibe_channel_create(capacity: i64) -> ptr
+        let chan_create_ty = ptr_ty.fn_type(&[i64_ty.into()], false);
+        let chan_create = self.llvm_module.add_function("vibe_channel_create", chan_create_ty, None);
+        self.functions.insert("vibe_channel_create".into(), chan_create);
+
+        // vibe_channel_send(channel: ptr, value: i64) -> void
+        let chan_send_ty = void_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false);
+        let chan_send = self.llvm_module.add_function("vibe_channel_send", chan_send_ty, None);
+        self.functions.insert("vibe_channel_send".into(), chan_send);
+
+        // vibe_channel_recv(channel: ptr) -> i64
+        let chan_recv_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+        let chan_recv = self.llvm_module.add_function("vibe_channel_recv", chan_recv_ty, None);
+        self.functions.insert("vibe_channel_recv".into(), chan_recv);
+
+        // vibe_channel_close(channel: ptr) -> void
+        let chan_close_ty = void_ty.fn_type(&[ptr_ty.into()], false);
+        let chan_close = self.llvm_module.add_function("vibe_channel_close", chan_close_ty, None);
+        self.functions.insert("vibe_channel_close".into(), chan_close);
+
+        // vibe_channel_destroy(channel: ptr) -> void
+        let chan_destroy_ty = void_ty.fn_type(&[ptr_ty.into()], false);
+        let chan_destroy = self.llvm_module.add_function("vibe_channel_destroy", chan_destroy_ty, None);
+        self.functions.insert("vibe_channel_destroy".into(), chan_destroy);
+
         // vibe_list_count(list: ptr) -> i64
         let count_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
         let count_fn = self.llvm_module.add_function("vibe_list_count", count_ty, None);
@@ -3444,6 +3543,236 @@ impl<'ctx> Codegen<'ctx> {
             pmap_fn,
             &[col_ptr.into(), func_ptr.into(), region_ptr.into()],
             "pmap_result",
+        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        Ok(result.try_as_basic_value().left())
+    }
+
+    /// Compile race(expr1, expr2, ...) — first to complete wins
+    fn compile_race(
+        &mut self,
+        exprs: &[Expr],
+        _function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let i32_ty = self.context.i32_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        let race_execute_fn = self.functions["vibe_race_execute"];
+        let malloc_fn = self.functions["malloc"];
+        let free_fn = self.functions["free"];
+
+        let n = exprs.len();
+
+        // Compile each expression as a thunk (same pattern as par)
+        let mut thunk_fns = Vec::new();
+        for (i, expr) in exprs.iter().enumerate() {
+            let thunk_ty = i64_ty.fn_type(&[], false);
+            let thunk_name = format!("race_thunk_{i}");
+            let thunk_fn = self.llvm_module.add_function(&thunk_name, thunk_ty, None);
+
+            let prev_bb = self.builder.get_insert_block();
+            let thunk_entry = self.context.append_basic_block(thunk_fn, "entry");
+            self.builder.position_at_end(thunk_entry);
+
+            self.push_scope();
+            let result = self.compile_expr(expr, thunk_fn)?;
+            let ret_val = result.unwrap_or_else(|| i64_ty.const_int(0, false).into());
+            let ret_val = self.ensure_i64(ret_val);
+            self.builder.build_return(Some(&ret_val))
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+            self.pop_scope();
+
+            if let Some(bb) = prev_bb {
+                self.builder.position_at_end(bb);
+            }
+            thunk_fns.push(thunk_fn);
+        }
+
+        // Allocate array for thunk function pointers
+        let arr_size = i64_ty.const_int((n * 8) as u64, false);
+        let thunks_arr = self.builder.build_call(malloc_fn, &[arr_size.into()], "race_thunks")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?
+            .try_as_basic_value().left().unwrap().into_pointer_value();
+
+        for (i, thunk_fn) in thunk_fns.iter().enumerate() {
+            let idx = i64_ty.const_int(i as u64, false);
+            let slot = unsafe {
+                self.builder.build_in_bounds_gep(ptr_ty, thunks_arr, &[idx], &format!("race_slot_{i}"))
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?
+            };
+            self.builder.build_store(slot, thunk_fn.as_global_value().as_pointer_value())
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+        }
+
+        // Call vibe_race_execute(thunks, n) -> i64
+        let result = self.builder.build_call(
+            race_execute_fn,
+            &[
+                thunks_arr.into(),
+                i32_ty.const_int(n as u64, false).into(),
+            ],
+            "race_result",
+        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        self.builder.build_call(free_fn, &[thunks_arr.into()], "")
+            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        Ok(result.try_as_basic_value().left())
+    }
+
+    /// Compile pfilter(collection, predicate) — parallel filter over a list
+    fn compile_pfilter(
+        &mut self,
+        collection: &Expr,
+        func: &Expr,
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        let col_val = self.compile_expr(collection, function)?.unwrap();
+        let func_val = self.compile_expr(func, function)?.unwrap();
+
+        let pfilter_fn = self.functions["vibe_pfilter_list"];
+
+        let func_ptr = if func_val.is_pointer_value() {
+            func_val.into_pointer_value()
+        } else {
+            return Err(CodegenError::Unsupported("pfilter requires a function".into()));
+        };
+
+        let col_ptr = if col_val.is_pointer_value() {
+            col_val.into_pointer_value()
+        } else {
+            return Ok(Some(col_val));
+        };
+
+        let region_ptr = self.region_stack.last().copied().flatten()
+            .unwrap_or(ptr_ty.const_null());
+
+        let result = self.builder.build_call(
+            pfilter_fn,
+            &[col_ptr.into(), func_ptr.into(), region_ptr.into()],
+            "pfilter_result",
+        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        Ok(result.try_as_basic_value().left())
+    }
+
+    /// Compile preduce(collection, init, function) — parallel tree reduction
+    fn compile_preduce(
+        &mut self,
+        collection: &Expr,
+        init: &Expr,
+        func: &Expr,
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let _i64_ty = self.context.i64_type();
+        let _ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        let col_val = self.compile_expr(collection, function)?.unwrap();
+        let init_val = self.compile_expr(init, function)?.unwrap();
+        let func_val = self.compile_expr(func, function)?.unwrap();
+
+        let preduce_fn = self.functions["vibe_preduce_list"];
+
+        let func_ptr = if func_val.is_pointer_value() {
+            func_val.into_pointer_value()
+        } else {
+            return Err(CodegenError::Unsupported("preduce requires a function".into()));
+        };
+
+        let col_ptr = if col_val.is_pointer_value() {
+            col_val.into_pointer_value()
+        } else {
+            return Ok(Some(col_val));
+        };
+
+        let init_i64 = self.ensure_i64(init_val);
+
+        let result = self.builder.build_call(
+            preduce_fn,
+            &[col_ptr.into(), init_i64.into(), func_ptr.into()],
+            "preduce_result",
+        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        Ok(result.try_as_basic_value().left())
+    }
+
+    /// Compile create_channel(capacity)
+    fn compile_chan_create(
+        &mut self,
+        capacity: &Expr,
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let cap_val = self.compile_expr(capacity, function)?.unwrap();
+        let cap_i64 = self.ensure_i64(cap_val);
+
+        let create_fn = self.functions["vibe_channel_create"];
+
+        let result = self.builder.build_call(
+            create_fn,
+            &[cap_i64.into()],
+            "channel",
+        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        Ok(result.try_as_basic_value().left())
+    }
+
+    /// Compile send(channel, value)
+    fn compile_chan_send(
+        &mut self,
+        channel: &Expr,
+        value: &Expr,
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+
+        let ch_val = self.compile_expr(channel, function)?.unwrap();
+        let val = self.compile_expr(value, function)?.unwrap();
+
+        let ch_ptr = if ch_val.is_pointer_value() {
+            ch_val.into_pointer_value()
+        } else {
+            // Channel stored as i64 pointer value
+            let ptr_ty = self.context.ptr_type(AddressSpace::default());
+            self.builder.build_int_to_ptr(ch_val.into_int_value(), ptr_ty, "ch_ptr")
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?
+        };
+
+        let val_i64 = self.ensure_i64(val);
+
+        let send_fn = self.functions["vibe_channel_send"];
+        self.builder.build_call(
+            send_fn,
+            &[ch_ptr.into(), val_i64.into()],
+            "",
+        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+        Ok(Some(i64_ty.const_int(0, false).into()))
+    }
+
+    /// Compile recv(channel)
+    fn compile_chan_recv(
+        &mut self,
+        channel: &Expr,
+        function: FunctionValue<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+        let ch_val = self.compile_expr(channel, function)?.unwrap();
+
+        let ch_ptr = if ch_val.is_pointer_value() {
+            ch_val.into_pointer_value()
+        } else {
+            let ptr_ty = self.context.ptr_type(AddressSpace::default());
+            self.builder.build_int_to_ptr(ch_val.into_int_value(), ptr_ty, "ch_ptr")
+                .map_err(|e| CodegenError::Llvm(e.to_string()))?
+        };
+
+        let recv_fn = self.functions["vibe_channel_recv"];
+        let result = self.builder.build_call(
+            recv_fn,
+            &[ch_ptr.into()],
+            "recv_val",
         ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
 
         Ok(result.try_as_basic_value().left())
@@ -4706,8 +5035,8 @@ impl<'ctx> Codegen<'ctx> {
                 if val.is_pointer_value() {
                     let ptr = val.into_pointer_value();
                     let i64_ty = self.context.i64_type();
-                    // Try to find matching record type
-                    for (_type_name, (struct_ty, field_names)) in &self.record_types.clone() {
+                    // Try to find matching record type (use first)
+                    if let Some((struct_ty, field_names)) = self.record_types.clone().values().next() {
                         for (field_name, pat) in fields {
                             if let Some(idx) = field_names.iter().position(|n| n == field_name) {
                                 if let Ok(field_ptr) = self.builder.build_struct_gep(*struct_ty, ptr, idx as u32, field_name) {
@@ -4717,7 +5046,6 @@ impl<'ctx> Codegen<'ctx> {
                                 }
                             }
                         }
-                        break; // Use first matching type
                     }
                 }
             }
