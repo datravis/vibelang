@@ -1,0 +1,23 @@
+--- Nominal types example
+--- Unlike type aliases, nominal types are NOT interchangeable with their inner type.
+
+module nominal_types
+
+--- Email is a distinct type from String
+nominal type Email = String
+
+--- UserId is a distinct type from Int
+nominal type UserId = Int
+
+--- Temperature with a type parameter
+nominal type Celsius = Float
+
+fn create_email(s: String) -> Email = s
+
+fn create_user_id(n: Int) -> UserId = n
+
+fn main() -> Unit with IO = do
+    let email = create_email("user@example.com")
+    let id = create_user_id(42)
+    print(show(email))
+    print(show(id))

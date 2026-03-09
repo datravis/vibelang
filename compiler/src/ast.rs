@@ -26,6 +26,7 @@ pub enum Decl {
     Function(FnDecl),
     TypeDef(TypeDef),
     NewtypeDef(NewtypeDef),
+    NominalDef(NominalDef),
     TraitDef(TraitDef),
     ImplBlock(ImplBlock),
     EffectDef(EffectDef),
@@ -99,6 +100,24 @@ pub struct NewtypeDef {
     pub span: Span,
 }
 
+/// A nominal type definition: `nominal type Email = String`
+/// Unlike type aliases, nominal types are NOT interchangeable with their inner type.
+#[derive(Debug, Clone)]
+pub struct NominalDef {
+    pub public: bool,
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub inner_type: TypeExpr,
+    pub span: Span,
+}
+
+/// A type parameter with optional trait bounds: `A: Eq + Ord`
+#[derive(Debug, Clone)]
+pub struct TypeParamBound {
+    pub name: String,
+    pub bounds: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TraitDef {
     pub name: String,
@@ -165,6 +184,7 @@ pub enum Expr {
     // Bindings
     Let(Pattern, Option<TypeExpr>, Box<Expr>, Box<Expr>, Span),
     LetBind(Pattern, Option<TypeExpr>, Box<Expr>, Span),
+    LetElse(Pattern, Option<TypeExpr>, Box<Expr>, Box<Expr>, Span), // let pat = expr else fallback
 
     // Effects
     Handle(Box<Expr>, Vec<Handler>, Span),

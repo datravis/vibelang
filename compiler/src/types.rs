@@ -89,6 +89,8 @@ impl std::fmt::Display for Type {
 struct TypeChecker {
     env: Vec<HashMap<String, Type>>,
     type_defs: HashMap<String, TypeDef>,
+    /// Nominal types: names that are NOT interchangeable with their inner type
+    nominal_types: HashMap<String, TypeExpr>,
     /// Effect definitions: effect_name -> list of (operation_name, param_types, return_type)
     effect_defs: HashMap<String, Vec<(String, Vec<Type>, Type)>>,
     /// All effect operation names -> (effect_name, param_types, return_type)
@@ -235,12 +237,41 @@ impl TypeChecker {
             Type::Fn(vec![Type::Unknown], Box::new(Type::Unit)),
         );
 
+        // Built-in trait definitions
+        let mut trait_defs = HashMap::new();
+        // Eq trait: fn eq(self, other) -> Bool
+        trait_defs.insert("Eq".into(), vec![
+            ("eq".into(), vec![Type::Unknown, Type::Unknown], Type::Bool),
+            ("neq".into(), vec![Type::Unknown, Type::Unknown], Type::Bool),
+        ]);
+        // Ord trait: fn compare(self, other) -> Int (-1, 0, 1)
+        trait_defs.insert("Ord".into(), vec![
+            ("compare".into(), vec![Type::Unknown, Type::Unknown], Type::Int),
+            ("lt".into(), vec![Type::Unknown, Type::Unknown], Type::Bool),
+            ("lte".into(), vec![Type::Unknown, Type::Unknown], Type::Bool),
+            ("gt".into(), vec![Type::Unknown, Type::Unknown], Type::Bool),
+            ("gte".into(), vec![Type::Unknown, Type::Unknown], Type::Bool),
+        ]);
+        // Show trait: fn show(self) -> String
+        trait_defs.insert("Show".into(), vec![
+            ("to_string".into(), vec![Type::Unknown], Type::String),
+        ]);
+        // Hash trait: fn hash(self) -> Int
+        trait_defs.insert("Hash".into(), vec![
+            ("hash".into(), vec![Type::Unknown], Type::Int),
+        ]);
+        // Default trait: fn default() -> Self
+        trait_defs.insert("Default".into(), vec![
+            ("default".into(), vec![], Type::Unknown),
+        ]);
+
         Self {
             env: vec![env],
             type_defs: HashMap::new(),
+            nominal_types: HashMap::new(),
             effect_defs: HashMap::new(),
             effect_ops: HashMap::new(),
-            trait_defs: HashMap::new(),
+            trait_defs,
             trait_impls: HashMap::new(),
             next_var: 0,
         }
@@ -508,6 +539,17 @@ impl TypeChecker {
                 Ok(result)
             }
 
+            Expr::LetElse(pattern, type_ann, value, fallback, _) => {
+                let val_type = self.check_expr(value)?;
+                let ty = type_ann
+                    .as_ref()
+                    .map(|ta| self.resolve_type_expr(ta))
+                    .unwrap_or(val_type);
+                self.bind_pattern_with_type(pattern, &ty)?;
+                self.check_expr(fallback)?;
+                Ok(Type::Unit)
+            }
+
             Expr::LetBind(pattern, type_ann, value, _) => {
                 let val_type = self.check_expr(value)?;
                 let ty = type_ann
@@ -709,6 +751,20 @@ pub fn check(module: &Module) -> Result<(), TypeError> {
                         type_params: nt.type_params.clone(),
                         body: TypeBody::Alias(nt.inner_type.clone()),
                         span: nt.span,
+                    },
+                );
+            }
+            Decl::NominalDef(nd) => {
+                // Register nominal type as a distinct named type (NOT an alias)
+                checker.nominal_types.insert(nd.name.clone(), nd.inner_type.clone());
+                checker.type_defs.insert(
+                    nd.name.clone(),
+                    TypeDef {
+                        public: nd.public,
+                        name: nd.name.clone(),
+                        type_params: nd.type_params.clone(),
+                        body: TypeBody::Alias(nd.inner_type.clone()),
+                        span: nd.span,
                     },
                 );
             }

@@ -1,0 +1,30 @@
+--- Trait bounds example
+--- Type parameters can have trait bounds: [A: Eq + Ord]
+
+module trait_bounds
+
+trait Eq {
+    fn eq(a: Int, b: Int) -> Bool
+}
+
+trait Ord {
+    fn compare(a: Int, b: Int) -> Int
+}
+
+trait Show {
+    fn to_string(x: Int) -> String
+}
+
+--- A function with bounded type parameters
+fn sort_pair[A: Ord](a: A, b: A) -> (A, A) =
+    if compare(a, b) > 0 then (b, a)
+    else (a, b)
+
+--- Multiple bounds
+fn display_sorted[A: Ord + Show](a: A, b: A) -> String = do
+    let pair = sort_pair(a, b)
+    to_string(pair)
+
+fn main() -> Unit with IO = do
+    let result = sort_pair(3, 1)
+    print(show(result))

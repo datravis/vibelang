@@ -250,6 +250,12 @@ impl EscapeAnalyzer {
                 self.bind_pattern(pattern);
             }
 
+            Expr::LetElse(pattern, _, value, fallback, _) => {
+                self.analyze_expr(value, false);
+                self.bind_pattern(pattern);
+                self.analyze_expr(fallback, false);
+            }
+
             Expr::Handle(expr, handlers, _) => {
                 self.analyze_expr(expr, is_tail);
                 for handler in handlers {

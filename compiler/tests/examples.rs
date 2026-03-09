@@ -69,6 +69,11 @@ lex_test!(lex_row_polymorphism, "row_polymorphism.vibe");
 lex_test!(lex_actors, "actors.vibe");
 lex_test!(lex_timeout, "timeout.vibe");
 lex_test!(lex_resource, "resource.vibe");
+lex_test!(lex_nominal_types, "nominal_types.vibe");
+lex_test!(lex_trait_bounds, "trait_bounds.vibe");
+lex_test!(lex_builtin_traits, "builtin_traits.vibe");
+lex_test!(lex_number_literals, "number_literals.vibe");
+lex_test!(lex_let_else, "let_else.vibe");
 
 // ── Parser tests ─────────────────────────────────────────────────────
 
@@ -115,6 +120,11 @@ parse_test!(parse_row_polymorphism, "row_polymorphism.vibe");
 parse_test!(parse_actors, "actors.vibe");
 parse_test!(parse_timeout, "timeout.vibe");
 parse_test!(parse_resource, "resource.vibe");
+parse_test!(parse_nominal_types, "nominal_types.vibe");
+parse_test!(parse_trait_bounds, "trait_bounds.vibe");
+parse_test!(parse_builtin_traits, "builtin_traits.vibe");
+parse_test!(parse_number_literals, "number_literals.vibe");
+parse_test!(parse_let_else, "let_else.vibe");
 
 // ── Type-checker tests ───────────────────────────────────────────────
 
@@ -156,3 +166,8 @@ typecheck_test!(typecheck_row_polymorphism, "row_polymorphism.vibe");
 typecheck_test!(typecheck_actors, "actors.vibe");
 typecheck_test!(typecheck_timeout, "timeout.vibe");
 typecheck_test!(typecheck_resource, "resource.vibe");
+typecheck_test!(typecheck_nominal_types, "nominal_types.vibe");
+typecheck_test!(typecheck_trait_bounds, "trait_bounds.vibe");
+typecheck_test!(typecheck_builtin_traits, "builtin_traits.vibe");
+typecheck_test!(typecheck_number_literals, "number_literals.vibe");
+typecheck_test!(typecheck_let_else, "let_else.vibe");

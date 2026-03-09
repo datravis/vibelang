@@ -349,6 +349,9 @@ impl<'ctx> Codegen<'ctx> {
                 Decl::NewtypeDef(_nt) => {
                     // Newtypes are transparent wrappers; they use the same LLVM type as their inner type
                 }
+                Decl::NominalDef(_nd) => {
+                    // Nominal types use the same LLVM type as their inner type at runtime
+                }
                 Decl::EffectDef(ed) => self.register_effect_def(ed)?,
                 Decl::TraitDef(td) => self.register_trait_def(td)?,
                 _ => {}
@@ -1758,6 +1761,16 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(Some(self.context.i64_type().const_int(0, false).into()))
             }
 
+            Expr::LetElse(pattern, _, value, fallback, _) => {
+                // Compile value, bind pattern, fallback is for when pattern doesn't match
+                // At codegen level, we compile value and bind; fallback is dead code for now
+                let val = self.compile_expr(value, function)?.unwrap();
+                self.bind_pattern_val(pattern, val);
+                // Compile fallback so it's validated but don't use it yet
+                let _fallback_val = self.compile_expr(fallback, function)?;
+                Ok(Some(self.context.i64_type().const_int(0, false).into()))
+            }
+
             Expr::Pipe(lhs, rhs, _) => {
                 let input = self.compile_expr(lhs, function)?;
 
@@ -2239,6 +2252,11 @@ impl<'ctx> Codegen<'ctx> {
             }
             Expr::LetBind(pat, _, val, _) => {
                 Self::collect_free_vars(val, bound, free);
+                Self::collect_pattern_bindings(pat, bound);
+            }
+            Expr::LetElse(pat, _, val, fallback, _) => {
+                Self::collect_free_vars(val, bound, free);
+                Self::collect_free_vars(fallback, bound, free);
                 Self::collect_pattern_bindings(pat, bound);
             }
             Expr::Handle(body, handlers, _) => {

@@ -207,6 +207,7 @@ impl Parser {
             TokenKind::Fn => Ok(Decl::Function(self.parse_fn_decl(public)?)),
             TokenKind::Type => Ok(Decl::TypeDef(self.parse_type_def(public)?)),
             TokenKind::Newtype => Ok(Decl::NewtypeDef(self.parse_newtype_def(public)?)),
+            TokenKind::Nominal => Ok(Decl::NominalDef(self.parse_nominal_def(public)?)),
             TokenKind::Trait => Ok(Decl::TraitDef(self.parse_trait_def()?)),
             TokenKind::Impl => Ok(Decl::ImplBlock(self.parse_impl_block()?)),
             TokenKind::Effect => Ok(Decl::EffectDef(self.parse_effect_def()?)),
@@ -217,7 +218,7 @@ impl Parser {
                     format!("{}", self.peek()),
                     span.line,
                     span.col,
-                    "declaration (fn, type, newtype, trait, impl, effect)".into(),
+                    "declaration (fn, type, newtype, nominal, trait, impl, effect)".into(),
                 ))
             }
         }
@@ -226,6 +227,8 @@ impl Parser {
     fn parse_fn_decl(&mut self, public: bool) -> Result<FnDecl, ParseError> {
         let span = self.expect(&TokenKind::Fn)?;
         let (name, _) = self.expect_ident()?;
+        // Optional type parameters: fn name[A: Ord, B](...)
+        let _type_params = self.parse_optional_type_params()?;
         let params = self.parse_params()?;
 
         let return_type = if *self.peek() == TokenKind::Arrow {
@@ -457,6 +460,23 @@ impl Parser {
         })
     }
 
+    /// Parse: `nominal type Name[A] = InnerType`
+    fn parse_nominal_def(&mut self, public: bool) -> Result<NominalDef, ParseError> {
+        let span = self.expect(&TokenKind::Nominal)?;
+        self.expect(&TokenKind::Type)?;
+        let (name, _) = self.expect_type_ident()?;
+        let type_params = self.parse_optional_type_params()?;
+        self.expect(&TokenKind::Eq)?;
+        let inner_type = self.parse_type_expr()?;
+        Ok(NominalDef {
+            public,
+            name,
+            type_params,
+            inner_type,
+            span,
+        })
+    }
+
     fn parse_type_def(&mut self, public: bool) -> Result<TypeDef, ParseError> {
         let span = self.expect(&TokenKind::Type)?;
 
@@ -558,11 +578,62 @@ impl Parser {
         self.advance();
         let mut params = Vec::new();
         let (first, _) = self.expect_type_ident()?;
+        // Skip bounds (A: Trait + Trait) — consume but return just the name
+        if *self.peek() == TokenKind::Colon {
+            self.advance();
+            self.expect_type_ident()?; // first bound
+            while *self.peek() == TokenKind::Plus {
+                self.advance();
+                self.expect_type_ident()?; // additional bound
+            }
+        }
         params.push(first);
         while *self.peek() == TokenKind::Comma {
             self.advance();
             let (name, _) = self.expect_type_ident()?;
+            if *self.peek() == TokenKind::Colon {
+                self.advance();
+                self.expect_type_ident()?;
+                while *self.peek() == TokenKind::Plus {
+                    self.advance();
+                    self.expect_type_ident()?;
+                }
+            }
             params.push(name);
+        }
+        self.expect(&TokenKind::RBracket)?;
+        Ok(params)
+    }
+
+    /// Parse type params with bounds, returning full bound info: `[A: Eq + Ord, B]`
+    fn parse_bounded_type_params(&mut self) -> Result<Vec<TypeParamBound>, ParseError> {
+        if *self.peek() != TokenKind::LBracket {
+            return Ok(Vec::new());
+        }
+        self.advance();
+        let mut params = Vec::new();
+        loop {
+            if *self.peek() == TokenKind::RBracket {
+                break;
+            }
+            let (name, _) = self.expect_type_ident()?;
+            let mut bounds = Vec::new();
+            if *self.peek() == TokenKind::Colon {
+                self.advance();
+                let (bound, _) = self.expect_type_ident()?;
+                bounds.push(bound);
+                while *self.peek() == TokenKind::Plus {
+                    self.advance();
+                    let (bound, _) = self.expect_type_ident()?;
+                    bounds.push(bound);
+                }
+            }
+            params.push(TypeParamBound { name, bounds });
+            if *self.peek() == TokenKind::Comma {
+                self.advance();
+            } else {
+                break;
+            }
         }
         self.expect(&TokenKind::RBracket)?;
         Ok(params)
@@ -1498,8 +1569,8 @@ impl Parser {
 
     fn is_at_decl_start(&self) -> bool {
         matches!(self.peek(),
-            TokenKind::Fn | TokenKind::Type | TokenKind::Newtype | TokenKind::Trait
-            | TokenKind::Impl | TokenKind::Effect | TokenKind::Pub
+            TokenKind::Fn | TokenKind::Type | TokenKind::Newtype | TokenKind::Nominal
+            | TokenKind::Trait | TokenKind::Impl | TokenKind::Effect | TokenKind::Pub
             | TokenKind::Vibe)
     }
 
@@ -1515,6 +1586,19 @@ impl Parser {
         };
         self.expect(&TokenKind::Eq)?;
         let value = self.parse_expr()?;
+
+        // Check for 'else' for let-else expression: let pat = expr else fallback
+        if *self.peek() == TokenKind::Else {
+            self.advance();
+            let fallback = self.parse_expr()?;
+            return Ok(Expr::LetElse(
+                pattern,
+                type_ann,
+                Box::new(value),
+                Box::new(fallback),
+                span,
+            ));
+        }
 
         // Check if there's an 'in' for let-in expression
         if *self.peek() == TokenKind::In {
