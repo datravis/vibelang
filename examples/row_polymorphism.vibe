@@ -1,0 +1,23 @@
+--- Row polymorphism example
+
+module row_poly
+
+--- A record type with a row variable for extensibility
+type HasName = { name: String | r }
+
+--- A more specific record that extends HasName
+type Person = {
+    name: String,
+    age: Int
+}
+
+--- Function that works with any record containing a 'name' field
+fn greet(entity: { name: String | r }) -> String =
+    "Hello, " ++ entity.name
+
+fn get_name(person: Person) -> String = person.name
+
+fn main() -> Unit with IO = do
+    let person = { name: "Alice", age: 30 }
+    print(greet(person))
+    print(get_name(person))

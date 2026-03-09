@@ -392,6 +392,41 @@ impl Parser {
                 self.advance();
                 Ok(TypeExpr::Named(name, Vec::new()))
             }
+            // Record type expression: { field: Type, ... | r }
+            TokenKind::LBrace => {
+                self.advance();
+                let mut fields = Vec::new();
+                let mut row_var = None;
+                loop {
+                    if *self.peek() == TokenKind::RBrace {
+                        break;
+                    }
+                    // Check for row variable: | r
+                    if *self.peek() == TokenKind::Pipe {
+                        self.advance();
+                        let (rv, _) = self.expect_ident()?;
+                        row_var = Some(rv);
+                        break;
+                    }
+                    let (fname, _) = self.expect_ident()?;
+                    self.expect(&TokenKind::Colon)?;
+                    let ftype = self.parse_type_expr()?;
+                    fields.push((fname, ftype));
+                    if *self.peek() == TokenKind::Comma {
+                        self.advance();
+                    } else if *self.peek() == TokenKind::Pipe {
+                        // Row variable after fields
+                        self.advance();
+                        let (rv, _) = self.expect_ident()?;
+                        row_var = Some(rv);
+                        break;
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RBrace)?;
+                Ok(TypeExpr::Record(fields, row_var))
+            }
             _ => {
                 let span = self.span();
                 Err(ParseError::Unexpected(
@@ -472,11 +507,17 @@ impl Parser {
             }
             TypeBody::Variants(variants)
         } else if *self.peek() == TokenKind::LBrace {
-            // Record type
+            // Record type (with optional row variable: { field: Type | r })
             self.advance();
             let mut fields = Vec::new();
             loop {
                 if *self.peek() == TokenKind::RBrace {
+                    break;
+                }
+                // Row variable: | r (skip in TypeBody::Record for now)
+                if *self.peek() == TokenKind::Pipe {
+                    self.advance();
+                    let (_rv, _) = self.expect_ident()?;
                     break;
                 }
                 let (fname, _) = self.expect_ident()?;
@@ -485,6 +526,10 @@ impl Parser {
                 fields.push((fname, ftype));
                 if *self.peek() == TokenKind::Comma {
                     self.advance();
+                } else if *self.peek() == TokenKind::Pipe {
+                    self.advance();
+                    let (_rv, _) = self.expect_ident()?;
+                    break;
                 } else {
                     break;
                 }
@@ -1195,6 +1240,40 @@ impl Parser {
                 let channel = self.parse_expr()?;
                 self.expect(&TokenKind::RParen)?;
                 Ok(Expr::ChanRecv(Box::new(channel), span))
+            }
+
+            // Actor: spawn(handler)
+            TokenKind::Spawn => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let handler = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::SpawnActor(Box::new(handler), span))
+            }
+
+            // Actor: send_to(actor, message)
+            TokenKind::SendTo => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let actor = self.parse_expr()?;
+                self.expect(&TokenKind::Comma)?;
+                let message = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::SendTo(Box::new(actor), Box::new(message), span))
+            }
+
+            // Timeout: with_timeout(duration, expr)
+            TokenKind::WithTimeout => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let duration = self.parse_expr()?;
+                self.expect(&TokenKind::Comma)?;
+                let body = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::WithTimeout(Box::new(duration), Box::new(body), span))
             }
 
             // Backslash lambda: \x -> body

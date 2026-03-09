@@ -65,6 +65,10 @@ lex_test!(lex_string_interpolation, "string_interpolation.vibe");
 lex_test!(lex_compose, "compose.vibe");
 lex_test!(lex_newtype, "newtype.vibe");
 lex_test!(lex_when_expr, "when_expr.vibe");
+lex_test!(lex_row_polymorphism, "row_polymorphism.vibe");
+lex_test!(lex_actors, "actors.vibe");
+lex_test!(lex_timeout, "timeout.vibe");
+lex_test!(lex_resource, "resource.vibe");
 
 // ── Parser tests ─────────────────────────────────────────────────────
 
@@ -107,6 +111,10 @@ parse_test!(parse_string_interpolation, "string_interpolation.vibe");
 parse_test!(parse_compose, "compose.vibe");
 parse_test!(parse_newtype, "newtype.vibe");
 parse_test!(parse_when_expr, "when_expr.vibe");
+parse_test!(parse_row_polymorphism, "row_polymorphism.vibe");
+parse_test!(parse_actors, "actors.vibe");
+parse_test!(parse_timeout, "timeout.vibe");
+parse_test!(parse_resource, "resource.vibe");
 
 // ── Type-checker tests ───────────────────────────────────────────────
 
@@ -144,3 +152,7 @@ typecheck_test!(typecheck_string_interpolation, "string_interpolation.vibe");
 typecheck_test!(typecheck_compose, "compose.vibe");
 typecheck_test!(typecheck_newtype, "newtype.vibe");
 typecheck_test!(typecheck_when_expr, "when_expr.vibe");
+typecheck_test!(typecheck_row_polymorphism, "row_polymorphism.vibe");
+typecheck_test!(typecheck_actors, "actors.vibe");
+typecheck_test!(typecheck_timeout, "timeout.vibe");
+typecheck_test!(typecheck_resource, "resource.vibe");

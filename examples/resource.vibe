@@ -1,0 +1,24 @@
+--- Resource management example
+
+module resource_example
+
+--- Define a Resource effect for safe resource acquisition/release
+effect Resource {
+    fn acquire(name: String) -> Int
+    fn release(fd: Int) -> Unit
+}
+
+--- Use resource management with effects
+fn use_resource() -> Int with Resource = do
+    let fd = acquire("myfile.txt")
+    release(fd)
+    fd
+
+fn main() -> Int with IO = do
+    let result = handle use_resource()
+        with Resource {
+            acquire(name) -> resume(42)
+            release(fd) -> resume(())
+        }
+    print(show(result))
+    0

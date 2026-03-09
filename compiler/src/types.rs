@@ -205,6 +205,36 @@ impl TypeChecker {
             Type::Fn(vec![Type::Int], Box::new(Type::Unit)),
         );
 
+        // Actor operations
+        env.insert(
+            "spawn".into(),
+            Type::Fn(vec![Type::Fn(vec![Type::Unknown], Box::new(Type::Unit))], Box::new(Type::Unknown)),
+        );
+        env.insert(
+            "send_to".into(),
+            Type::Fn(vec![Type::Unknown, Type::Unknown], Box::new(Type::Unit)),
+        );
+        env.insert(
+            "receive".into(),
+            Type::Fn(vec![], Box::new(Type::Unknown)),
+        );
+
+        // Timeout
+        env.insert(
+            "with_timeout".into(),
+            Type::Fn(vec![Type::Int, Type::Unknown], Box::new(Type::Unknown)),
+        );
+
+        // Resource management
+        env.insert(
+            "acquire".into(),
+            Type::Fn(vec![Type::Fn(vec![], Box::new(Type::Unknown)), Type::Fn(vec![Type::Unknown], Box::new(Type::Unit))], Box::new(Type::Unknown)),
+        );
+        env.insert(
+            "release".into(),
+            Type::Fn(vec![Type::Unknown], Box::new(Type::Unit)),
+        );
+
         Self {
             env: vec![env],
             type_defs: HashMap::new(),
@@ -559,6 +589,23 @@ impl TypeChecker {
             Expr::ChanRecv(channel, _) => {
                 self.check_expr(channel)?;
                 Ok(Type::Int)
+            }
+
+            Expr::SpawnActor(handler, _) => {
+                self.check_expr(handler)?;
+                Ok(Type::Unknown) // returns ActorRef
+            }
+
+            Expr::SendTo(actor, message, _) => {
+                self.check_expr(actor)?;
+                self.check_expr(message)?;
+                Ok(Type::Unit)
+            }
+
+            Expr::WithTimeout(duration, body, _) => {
+                self.check_expr(duration)?;
+                let body_type = self.check_expr(body)?;
+                Ok(body_type) // returns Option[A] conceptually
             }
 
             Expr::VibePipeline(source, _stages, _) => {

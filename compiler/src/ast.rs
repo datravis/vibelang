@@ -181,6 +181,11 @@ pub enum Expr {
     ChanSend(Box<Expr>, Box<Expr>, Span),        // send(channel, value)
     ChanRecv(Box<Expr>, Span),                   // recv(channel)
     VibePipeline(Box<Expr>, Vec<PipelineStage>, Span), // vibe: source |> stages |> terminal
+
+    // Actors
+    SpawnActor(Box<Expr>, Span),                 // spawn(handler)
+    SendTo(Box<Expr>, Box<Expr>, Span),          // send_to(actor, message)
+    WithTimeout(Box<Expr>, Box<Expr>, Span),     // with_timeout(duration, expr)
 }
 
 #[derive(Debug, Clone)]

@@ -64,6 +64,7 @@ pub enum TokenKind {
     Resume,
     Return,
     SendChan,
+    SendTo,
     Source,
     Spawn,
     Stream,
@@ -76,6 +77,7 @@ pub enum TokenKind {
     Vibe,
     When,
     With,
+    WithTimeout,
 
     // Operators
     Plus,
@@ -704,6 +706,7 @@ impl<'a> Lexer<'a> {
             "resume" => TokenKind::Resume,
             "return" => TokenKind::Return,
             "send" => TokenKind::SendChan,
+            "send_to" => TokenKind::SendTo,
             "source" => TokenKind::Source,
             "spawn" => TokenKind::Spawn,
             "stream" => TokenKind::Stream,
@@ -717,6 +720,7 @@ impl<'a> Lexer<'a> {
             "vibe" => TokenKind::Vibe,
             "when" => TokenKind::When,
             "with" => TokenKind::With,
+            "with_timeout" => TokenKind::WithTimeout,
             _ => {
                 // PascalCase = TypeIdent, lower_snake = Ident
                 if ident.chars().next().unwrap().is_uppercase() {

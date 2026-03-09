@@ -2099,6 +2099,49 @@ impl<'ctx> Codegen<'ctx> {
             Expr::VibePipeline(source, stages, _) => {
                 self.compile_vibe_pipeline(source, stages, function)
             }
+
+            Expr::SpawnActor(handler, _) => {
+                let handler_val = self.compile_expr(handler, function)?.unwrap();
+                let i64_type = self.context.i64_type();
+                let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                let spawn_fn = self.llvm_module.get_function("vibe_spawn_actor").unwrap_or_else(|| {
+                    self.llvm_module.add_function("vibe_spawn_actor", fn_type, None)
+                });
+                let handler_i64 = self.ensure_i64(handler_val);
+                let result = self.builder.build_call(spawn_fn, &[handler_i64.into()], "actor")
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                Ok(result.try_as_basic_value().left())
+            }
+
+            Expr::SendTo(actor, message, _) => {
+                let actor_val = self.compile_expr(actor, function)?.unwrap();
+                let msg_val = self.compile_expr(message, function)?.unwrap();
+                let i64_type = self.context.i64_type();
+                let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                let send_fn = self.llvm_module.get_function("vibe_send_to").unwrap_or_else(|| {
+                    self.llvm_module.add_function("vibe_send_to", fn_type, None)
+                });
+                let actor_i64 = self.ensure_i64(actor_val);
+                let msg_i64 = self.ensure_i64(msg_val);
+                let result = self.builder.build_call(send_fn, &[actor_i64.into(), msg_i64.into()], "send")
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                Ok(result.try_as_basic_value().left())
+            }
+
+            Expr::WithTimeout(duration, body, _) => {
+                let dur_val = self.compile_expr(duration, function)?.unwrap();
+                let body_val = self.compile_expr(body, function)?.unwrap();
+                let i64_type = self.context.i64_type();
+                let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                let timeout_fn = self.llvm_module.get_function("vibe_with_timeout").unwrap_or_else(|| {
+                    self.llvm_module.add_function("vibe_with_timeout", fn_type, None)
+                });
+                let dur_i64 = self.ensure_i64(dur_val);
+                let body_i64 = self.ensure_i64(body_val);
+                let result = self.builder.build_call(timeout_fn, &[dur_i64.into(), body_i64.into()], "timeout")
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                Ok(result.try_as_basic_value().left())
+            }
         }
     }
 
@@ -2149,7 +2192,8 @@ impl<'ctx> Codegen<'ctx> {
                 Self::collect_free_vars(base, bound, free);
             }
             Expr::BinOp(l, _, r, _) | Expr::Pipe(l, r, _) | Expr::Pmap(l, r, _)
-            | Expr::Pfilter(l, r, _) | Expr::ChanSend(l, r, _) => {
+            | Expr::Pfilter(l, r, _) | Expr::ChanSend(l, r, _)
+            | Expr::SendTo(l, r, _) | Expr::WithTimeout(l, r, _) => {
                 Self::collect_free_vars(l, bound, free);
                 Self::collect_free_vars(r, bound, free);
             }
@@ -2222,7 +2266,7 @@ impl<'ctx> Codegen<'ctx> {
                 Self::collect_free_vars(init, bound, free);
                 Self::collect_free_vars(func, bound, free);
             }
-            Expr::ChanCreate(cap, _) => {
+            Expr::ChanCreate(cap, _) | Expr::SpawnActor(cap, _) => {
                 Self::collect_free_vars(cap, bound, free);
             }
             Expr::ChanRecv(ch, _) => {

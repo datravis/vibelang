@@ -289,11 +289,11 @@ impl EscapeAnalyzer {
                 self.analyze_expr(func, false);
             }
 
-            Expr::ChanCreate(cap, _) => {
+            Expr::ChanCreate(cap, _) | Expr::SpawnActor(cap, _) => {
                 self.analyze_expr(cap, false);
             }
 
-            Expr::ChanSend(ch, val, _) => {
+            Expr::ChanSend(ch, val, _) | Expr::SendTo(ch, val, _) | Expr::WithTimeout(ch, val, _) => {
                 self.analyze_expr(ch, false);
                 self.analyze_expr(val, false);
             }

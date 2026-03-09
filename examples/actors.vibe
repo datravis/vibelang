@@ -1,0 +1,13 @@
+--- Actor model example
+
+module actors
+
+--- Spawn an actor with a message handler
+fn run_actor() -> Unit with IO = do
+    let handler = \msg -> print(show(msg))
+    let actor = spawn(handler)
+    send_to(actor, 42)
+    send_to(actor, 100)
+
+fn main() -> Unit with IO = do
+    run_actor()
