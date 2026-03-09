@@ -1,0 +1,24 @@
+--- Newtype wrappers example
+
+module newtypes
+
+--- Define newtypes for type-safe wrappers
+newtype UserId = Int
+newtype Email = String
+newtype Meters = Float
+
+--- A user record using newtypes
+type User = {
+    id: UserId,
+    email: Email,
+    name: String
+}
+
+fn create_user(id: UserId, email: Email, name: String) -> User =
+    { id: id, email: email, name: name }
+
+fn get_user_name(user: User) -> String = user.name
+
+fn main() -> Unit with IO = do
+    let user = create_user(1, "alice@example.com", "Alice")
+    print(get_user_name(user))

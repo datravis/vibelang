@@ -1,0 +1,24 @@
+--- Function composition example
+
+module compose
+
+fn double(x: Int) -> Int = x * 2
+
+fn add_one(x: Int) -> Int = x + 1
+
+fn negate(x: Int) -> Int = -x
+
+--- Compose two functions using >> operator
+fn apply_composed(x: Int) -> Int =
+    let double_then_add = double >> add_one in
+    double_then_add(x)
+
+--- Compose in a pipeline context
+fn transform(x: Int) -> Int =
+    (double >> add_one >> negate)(x)
+
+fn main() -> Unit with IO = do
+    let result = apply_composed(3)
+    print(show(result))
+    let result2 = transform(5)
+    print(show(result2))

@@ -206,6 +206,7 @@ impl Parser {
         match self.peek() {
             TokenKind::Fn => Ok(Decl::Function(self.parse_fn_decl(public)?)),
             TokenKind::Type => Ok(Decl::TypeDef(self.parse_type_def(public)?)),
+            TokenKind::Newtype => Ok(Decl::NewtypeDef(self.parse_newtype_def(public)?)),
             TokenKind::Trait => Ok(Decl::TraitDef(self.parse_trait_def()?)),
             TokenKind::Impl => Ok(Decl::ImplBlock(self.parse_impl_block()?)),
             TokenKind::Effect => Ok(Decl::EffectDef(self.parse_effect_def()?)),
@@ -216,7 +217,7 @@ impl Parser {
                     format!("{}", self.peek()),
                     span.line,
                     span.col,
-                    "declaration (fn, type, trait, impl, effect)".into(),
+                    "declaration (fn, type, newtype, trait, impl, effect)".into(),
                 ))
             }
         }
@@ -404,6 +405,22 @@ impl Parser {
     }
 
     // ---- Type definitions ----
+
+    /// Parse: newtype Name[A] = InnerType
+    fn parse_newtype_def(&mut self, public: bool) -> Result<NewtypeDef, ParseError> {
+        let span = self.expect(&TokenKind::Newtype)?;
+        let (name, _) = self.expect_type_ident()?;
+        let type_params = self.parse_optional_type_params()?;
+        self.expect(&TokenKind::Eq)?;
+        let inner_type = self.parse_type_expr()?;
+        Ok(NewtypeDef {
+            public,
+            name,
+            type_params,
+            inner_type,
+            span,
+        })
+    }
 
     fn parse_type_def(&mut self, public: bool) -> Result<TypeDef, ParseError> {
         let span = self.expect(&TokenKind::Type)?;
@@ -707,13 +724,26 @@ impl Parser {
     }
 
     fn parse_pipe_expr(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_or_expr()?;
+        let mut expr = self.parse_compose_expr()?;
 
         while *self.peek() == TokenKind::PipeGt {
             let span = self.span();
             self.advance();
-            let rhs = self.parse_or_expr()?;
+            let rhs = self.parse_compose_expr()?;
             expr = Expr::Pipe(Box::new(expr), Box::new(rhs), span);
+        }
+
+        Ok(expr)
+    }
+
+    fn parse_compose_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_or_expr()?;
+
+        while *self.peek() == TokenKind::GtGt {
+            let span = self.span();
+            self.advance();
+            let rhs = self.parse_or_expr()?;
+            expr = Expr::BinOp(Box::new(expr), BinOp::Compose, Box::new(rhs), span);
         }
 
         Ok(expr)
@@ -881,6 +911,40 @@ impl Parser {
                 self.advance();
                 Ok(Expr::StringLit(s, span))
             }
+
+            // String interpolation: StringInterpStart expr StringInterpPart expr ... StringInterpEnd
+            TokenKind::StringInterpStart(s) => {
+                let span = self.span();
+                self.advance();
+                let mut parts = vec![StringPart::Literal(s)];
+                // Parse first interpolated expression
+                parts.push(StringPart::Expr(self.parse_expr()?));
+                // Parse remaining parts
+                loop {
+                    match self.peek().clone() {
+                        TokenKind::StringInterpPart(lit) => {
+                            self.advance();
+                            parts.push(StringPart::Literal(lit));
+                            parts.push(StringPart::Expr(self.parse_expr()?));
+                        }
+                        TokenKind::StringInterpEnd(lit) => {
+                            self.advance();
+                            parts.push(StringPart::Literal(lit));
+                            break;
+                        }
+                        _ => {
+                            let span = self.span();
+                            return Err(ParseError::Unexpected(
+                                format!("{}", self.peek()),
+                                span.line,
+                                span.col,
+                                "string interpolation part or end".into(),
+                            ));
+                        }
+                    }
+                }
+                Ok(Expr::StringInterp(parts, span))
+            }
             TokenKind::CharLit(c) => {
                 let span = self.span();
                 self.advance();
@@ -1010,6 +1074,9 @@ impl Parser {
 
             // Match expression
             TokenKind::Match => self.parse_match_expr(),
+
+            // When expression (guard-based conditional)
+            TokenKind::When => self.parse_when_expr(),
 
             // Do block
             TokenKind::Do => self.parse_do_block(),
@@ -1290,6 +1357,35 @@ impl Parser {
         }
     }
 
+    /// Parse: when { cond1 -> expr1, cond2 -> expr2, otherwise -> default }
+    fn parse_when_expr(&mut self) -> Result<Expr, ParseError> {
+        let span = self.span();
+        self.expect(&TokenKind::When)?;
+        self.expect(&TokenKind::LBrace)?;
+
+        let mut clauses = Vec::new();
+        loop {
+            if *self.peek() == TokenKind::RBrace {
+                break;
+            }
+            // `otherwise` is the default/else clause
+            let condition = if *self.peek() == TokenKind::Otherwise {
+                self.advance();
+                Expr::BoolLit(true, span)
+            } else {
+                self.parse_expr()?
+            };
+            self.expect(&TokenKind::Arrow)?;
+            let body = self.parse_expr()?;
+            clauses.push(WhenClause { condition, body });
+            if *self.peek() == TokenKind::Comma {
+                self.advance();
+            }
+        }
+        self.expect(&TokenKind::RBrace)?;
+        Ok(Expr::When(clauses, span))
+    }
+
     fn parse_do_block(&mut self) -> Result<Expr, ParseError> {
         let span = self.span();
         self.expect(&TokenKind::Do)?;
@@ -1323,7 +1419,7 @@ impl Parser {
 
     fn is_at_decl_start(&self) -> bool {
         matches!(self.peek(),
-            TokenKind::Fn | TokenKind::Type | TokenKind::Trait
+            TokenKind::Fn | TokenKind::Type | TokenKind::Newtype | TokenKind::Trait
             | TokenKind::Impl | TokenKind::Effect | TokenKind::Pub
             | TokenKind::Vibe)
     }
@@ -1550,6 +1646,58 @@ mod tests {
                 assert_eq!(ib.methods[0].name, "eq");
             }
             _ => panic!("expected impl block"),
+        }
+    }
+
+    #[test]
+    fn test_string_interpolation() {
+        let m = parse_str(r#"module main
+fn greet(name: String) -> String = "Hello, ${name}!""#);
+        match &m.declarations[0] {
+            Decl::Function(f) => match &f.body {
+                Expr::StringInterp(parts, _) => {
+                    assert_eq!(parts.len(), 3); // "Hello, " + name + "!"
+                }
+                other => panic!("expected string interp, got {other:?}"),
+            },
+            _ => panic!("expected function"),
+        }
+    }
+
+    #[test]
+    fn test_compose_expr() {
+        let m = parse_str("module main\nfn composed() -> Int = double >> add_one");
+        match &m.declarations[0] {
+            Decl::Function(f) => match &f.body {
+                Expr::BinOp(_, BinOp::Compose, _, _) => {}
+                other => panic!("expected compose, got {other:?}"),
+            },
+            _ => panic!("expected function"),
+        }
+    }
+
+    #[test]
+    fn test_newtype_def() {
+        let m = parse_str("module main\nnewtype UserId = Int");
+        match &m.declarations[0] {
+            Decl::NewtypeDef(nt) => {
+                assert_eq!(nt.name, "UserId");
+            }
+            _ => panic!("expected newtype def"),
+        }
+    }
+
+    #[test]
+    fn test_when_expr() {
+        let m = parse_str("module main\nfn f(x: Int) -> String = when { x > 0 -> \"pos\", otherwise -> \"neg\" }");
+        match &m.declarations[0] {
+            Decl::Function(f) => match &f.body {
+                Expr::When(clauses, _) => {
+                    assert_eq!(clauses.len(), 2);
+                }
+                other => panic!("expected when, got {other:?}"),
+            },
+            _ => panic!("expected function"),
         }
     }
 

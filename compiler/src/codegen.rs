@@ -346,6 +346,9 @@ impl<'ctx> Codegen<'ctx> {
         for decl in &module.declarations {
             match decl {
                 Decl::TypeDef(td) => self.register_type_def(td)?,
+                Decl::NewtypeDef(_nt) => {
+                    // Newtypes are transparent wrappers; they use the same LLVM type as their inner type
+                }
                 Decl::EffectDef(ed) => self.register_effect_def(ed)?,
                 Decl::TraitDef(td) => self.register_trait_def(td)?,
                 _ => {}
@@ -1110,6 +1113,50 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(Some(global.as_pointer_value().into()))
             }
 
+            Expr::StringInterp(parts, _) => {
+                // String interpolation: concatenate all parts
+                // For now, compile each part and concatenate using the runtime's string concat
+                // As a baseline, produce the first part and then fold over the rest
+                let mut result: Option<BasicValueEnum> = None;
+                for part in parts {
+                    let val = match part {
+                        StringPart::Literal(s) => {
+                            let global = self.builder.build_global_string_ptr(s, "str_part")
+                                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            global.as_pointer_value().into()
+                        }
+                        StringPart::Expr(e) => {
+                            // Compile the expression, then call show() to convert to string
+                            let val = self.compile_expr(e, function)?.unwrap();
+                            // If already a pointer (string), use directly; otherwise wrap with show
+                            if val.is_pointer_value() {
+                                val
+                            } else {
+                                // For non-string values, just pass through (runtime show not yet available)
+                                val
+                            }
+                        }
+                    };
+                    result = Some(match result {
+                        None => val,
+                        Some(prev) => {
+                            // Call vibe_string_concat(prev, val) if available, otherwise just use the last
+                            if let Some(concat_fn) = self.llvm_module.get_function("vibe_string_concat") {
+                                let call = self.builder.build_call(
+                                    concat_fn,
+                                    &[prev.into(), val.into()],
+                                    "str_concat",
+                                ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                call.try_as_basic_value().left().unwrap_or(val)
+                            } else {
+                                val // fallback: just use last part
+                            }
+                        }
+                    });
+                }
+                Ok(result)
+            }
+
             Expr::CharLit(c, _) => {
                 let val = self.context.i8_type().const_int(*c as u64, false);
                 Ok(Some(val.into()))
@@ -1192,6 +1239,11 @@ impl<'ctx> Codegen<'ctx> {
                             self.builder.build_int_add(lv, rv, "concat")
                                 .map_err(|e| CodegenError::Llvm(e.to_string()))?.into()
                         }
+                        BinOp::Compose => {
+                            // Function composition at runtime - return the RHS for now
+                            // Full compose would build a closure that chains f >> g
+                            rv.into()
+                        }
                     }
                 } else if l.is_float_value() && r.is_float_value() {
                     let lv = l.into_float_value();
@@ -1220,6 +1272,24 @@ impl<'ctx> Codegen<'ctx> {
                         BinOp::Gte => self.builder.build_float_compare(FloatPredicate::OGE, lv, rv, "fge")
                             .map_err(|e| CodegenError::Llvm(e.to_string()))?.into(),
                         _ => return Err(CodegenError::Unsupported(format!("float op {op:?}"))),
+                    }
+                } else if l.is_pointer_value() && r.is_pointer_value() {
+                    match op {
+                        BinOp::Concat => {
+                            // String concatenation via runtime function
+                            if let Some(concat_fn) = self.llvm_module.get_function("vibe_string_concat") {
+                                let call = self.builder.build_call(
+                                    concat_fn,
+                                    &[l.into(), r.into()],
+                                    "str_concat",
+                                ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                                call.try_as_basic_value().left().unwrap_or(l)
+                            } else {
+                                l // fallback
+                            }
+                        }
+                        BinOp::Compose => l, // function compose stub
+                        _ => return Err(CodegenError::Unsupported(format!("pointer op {op:?}"))),
                     }
                 } else {
                     return Err(CodegenError::Unsupported("mixed-type binary op".into()));
@@ -1453,6 +1523,67 @@ impl<'ctx> Codegen<'ctx> {
                 phi.add_incoming(&[(&then_i64, then_bb_end), (&else_i64, else_bb_end)]);
 
                 Ok(Some(phi.as_basic_value()))
+            }
+
+            Expr::When(clauses, _) => {
+                // When expression: chain of condition checks like if-else-if
+                if clauses.is_empty() {
+                    return Ok(Some(self.context.i64_type().const_int(0, false).into()));
+                }
+
+                let merge_bb = self.context.append_basic_block(function, "when_merge");
+                let mut incoming: Vec<(BasicValueEnum, inkwell::basic_block::BasicBlock)> = Vec::new();
+
+                for (i, clause) in clauses.iter().enumerate() {
+                    let cond_val = self.compile_expr(&clause.condition, function)?.unwrap();
+                    let cond_bool = if cond_val.is_int_value() {
+                        let iv = cond_val.into_int_value();
+                        if iv.get_type().get_bit_width() == 1 {
+                            iv
+                        } else {
+                            let zero = iv.get_type().const_int(0, false);
+                            self.builder.build_int_compare(IntPredicate::NE, iv, zero, "tobool")
+                                .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                        }
+                    } else {
+                        // Non-int condition, treat as true for `otherwise`
+                        self.context.bool_type().const_int(1, false)
+                    };
+
+                    let body_bb = self.context.append_basic_block(function, &format!("when_body_{i}"));
+                    let next_bb = if i + 1 < clauses.len() {
+                        self.context.append_basic_block(function, &format!("when_next_{i}"))
+                    } else {
+                        merge_bb
+                    };
+
+                    self.builder.build_conditional_branch(cond_bool, body_bb, next_bb)
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+                    self.builder.position_at_end(body_bb);
+                    let body_val = self.compile_expr(&clause.body, function)?
+                        .unwrap_or_else(|| self.context.i64_type().const_int(0, false).into());
+                    self.builder.build_unconditional_branch(merge_bb)
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    let body_bb_end = self.builder.get_insert_block().unwrap();
+                    incoming.push((body_val, body_bb_end));
+
+                    if i + 1 < clauses.len() {
+                        self.builder.position_at_end(next_bb);
+                    }
+                }
+
+                self.builder.position_at_end(merge_bb);
+                if incoming.is_empty() {
+                    Ok(Some(self.context.i64_type().const_int(0, false).into()))
+                } else {
+                    let phi = self.builder.build_phi(incoming[0].0.get_type(), "when_result")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    for (val, bb) in &incoming {
+                        phi.add_incoming(&[(val, *bb)]);
+                    }
+                    Ok(Some(phi.as_basic_value()))
+                }
             }
 
             Expr::Match(scrutinee, arms, _) => {
@@ -1984,6 +2115,19 @@ impl<'ctx> Codegen<'ctx> {
             Expr::IntLit(_, _) | Expr::FloatLit(_, _) | Expr::StringLit(_, _)
             | Expr::CharLit(_, _) | Expr::BoolLit(_, _) | Expr::UnitLit(_)
             | Expr::TypeConstructor(_, _) => {}
+            Expr::StringInterp(parts, _) => {
+                for part in parts {
+                    if let StringPart::Expr(e) = part {
+                        Self::collect_free_vars(e, bound, free);
+                    }
+                }
+            }
+            Expr::When(clauses, _) => {
+                for clause in clauses {
+                    Self::collect_free_vars(&clause.condition, bound, free);
+                    Self::collect_free_vars(&clause.body, bound, free);
+                }
+            }
 
             Expr::List(elems, _) | Expr::Tuple(elems, _) | Expr::DoBlock(elems, _) => {
                 for e in elems {
