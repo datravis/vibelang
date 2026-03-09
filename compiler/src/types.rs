@@ -445,7 +445,7 @@ impl TypeChecker {
                     .map(|ta| self.resolve_type_expr(ta))
                     .unwrap_or(val_type);
                 self.push_scope();
-                self.bind_pattern_with_type(&pattern, &ty)?;
+                self.bind_pattern_with_type(pattern, &ty)?;
                 let result = self.check_expr(body)?;
                 self.pop_scope();
                 Ok(result)
@@ -457,7 +457,7 @@ impl TypeChecker {
                     .as_ref()
                     .map(|ta| self.resolve_type_expr(ta))
                     .unwrap_or(val_type);
-                self.bind_pattern_with_type(&pattern, &ty)?;
+                self.bind_pattern_with_type(pattern, &ty)?;
                 Ok(Type::Unit)
             }
 

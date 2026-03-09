@@ -1593,7 +1593,7 @@ impl<'ctx> Codegen<'ctx> {
                 for (val, bb) in &phi_incoming {
                     if first_val.is_pointer_value() {
                         // All values must be pointers
-                        phi.add_incoming(&[(&*val, *bb)]);
+                        phi.add_incoming(&[(val, *bb)]);
                     } else {
                         let coerced = self.ensure_i64(*val);
                         phi.add_incoming(&[(&coerced, *bb)]);
@@ -1615,7 +1615,7 @@ impl<'ctx> Codegen<'ctx> {
             Expr::Let(pattern, _, value, body, _) => {
                 let val = self.compile_expr(value, function)?.unwrap();
                 self.push_scope();
-                self.bind_pattern_val(&pattern, val);
+                self.bind_pattern_val(pattern, val);
                 let result = self.compile_expr(body, function)?;
                 self.pop_scope();
                 Ok(result)
@@ -1623,7 +1623,7 @@ impl<'ctx> Codegen<'ctx> {
 
             Expr::LetBind(pattern, _, value, _) => {
                 let val = self.compile_expr(value, function)?.unwrap();
-                self.bind_pattern_val(&pattern, val);
+                self.bind_pattern_val(pattern, val);
                 Ok(Some(self.context.i64_type().const_int(0, false).into()))
             }
 
@@ -2073,10 +2073,6 @@ impl<'ctx> Codegen<'ctx> {
                     Self::collect_free_vars(e, bound, free);
                 }
             }
-            Expr::Pfilter(col, func, _) => {
-                Self::collect_free_vars(col, bound, free);
-                Self::collect_free_vars(func, bound, free);
-            }
             Expr::Preduce(col, init, func, _) => {
                 Self::collect_free_vars(col, bound, free);
                 Self::collect_free_vars(init, bound, free);
@@ -2084,10 +2080,6 @@ impl<'ctx> Codegen<'ctx> {
             }
             Expr::ChanCreate(cap, _) => {
                 Self::collect_free_vars(cap, bound, free);
-            }
-            Expr::ChanSend(ch, val, _) => {
-                Self::collect_free_vars(ch, bound, free);
-                Self::collect_free_vars(val, bound, free);
             }
             Expr::ChanRecv(ch, _) => {
                 Self::collect_free_vars(ch, bound, free);
@@ -2149,7 +2141,7 @@ impl<'ctx> Codegen<'ctx> {
         &mut self,
         params: &[Param],
         body: &Expr,
-        function: FunctionValue<'ctx>,
+        _function: FunctionValue<'ctx>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
         let i64_ty = self.context.i64_type();
         let ptr_ty = self.context.ptr_type(AddressSpace::default());
@@ -2207,7 +2199,7 @@ impl<'ctx> Codegen<'ctx> {
                     .build_struct_gep(env_struct_ty, env_ptr, i as u32, &format!("env.{}", name))
                     .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 let loaded = self.builder
-                    .build_load(i64_ty, field_ptr, &name)
+                    .build_load(i64_ty, field_ptr, name)
                     .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 self.set_var(name.clone(), loaded);
             }
@@ -2760,7 +2752,7 @@ impl<'ctx> Codegen<'ctx> {
         let base_ptr = base_val.into_pointer_value();
 
         // Try to match against known record types
-        for (_type_name, (struct_ty, field_names)) in &self.record_types.clone() {
+        for (struct_ty, field_names) in self.record_types.clone().values() {
             if let Some(idx) = field_names.iter().position(|n| n == field) {
                 let field_ptr = self.builder.build_struct_gep(*struct_ty, base_ptr, idx as u32, &format!("field.{field}"))
                     .map_err(|e| CodegenError::Llvm(e.to_string()))?;
@@ -3560,7 +3552,7 @@ impl<'ctx> Codegen<'ctx> {
     fn compile_race(
         &mut self,
         exprs: &[Expr],
-        function: FunctionValue<'ctx>,
+        _function: FunctionValue<'ctx>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
         let i64_ty = self.context.i64_type();
         let i32_ty = self.context.i32_type();
@@ -3675,8 +3667,8 @@ impl<'ctx> Codegen<'ctx> {
         func: &Expr,
         function: FunctionValue<'ctx>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
-        let i64_ty = self.context.i64_type();
-        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let _i64_ty = self.context.i64_type();
+        let _ptr_ty = self.context.ptr_type(AddressSpace::default());
 
         let col_val = self.compile_expr(collection, function)?.unwrap();
         let init_val = self.compile_expr(init, function)?.unwrap();
@@ -5043,8 +5035,8 @@ impl<'ctx> Codegen<'ctx> {
                 if val.is_pointer_value() {
                     let ptr = val.into_pointer_value();
                     let i64_ty = self.context.i64_type();
-                    // Try to find matching record type
-                    for (_type_name, (struct_ty, field_names)) in &self.record_types.clone() {
+                    // Try to find matching record type (use first)
+                    if let Some((struct_ty, field_names)) = self.record_types.clone().values().next() {
                         for (field_name, pat) in fields {
                             if let Some(idx) = field_names.iter().position(|n| n == field_name) {
                                 if let Ok(field_ptr) = self.builder.build_struct_gep(*struct_ty, ptr, idx as u32, field_name) {
@@ -5054,7 +5046,6 @@ impl<'ctx> Codegen<'ctx> {
                                 }
                             }
                         }
-                        break; // Use first matching type
                     }
                 }
             }

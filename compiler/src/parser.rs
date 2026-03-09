@@ -168,14 +168,9 @@ impl Parser {
             } else if *self.peek() == TokenKind::LBrace {
                 self.advance();
                 let mut names = Vec::new();
-                loop {
-                    match self.peek().clone() {
-                        TokenKind::Ident(n) | TokenKind::TypeIdent(n) => {
-                            self.advance();
-                            names.push(n);
-                        }
-                        _ => break,
-                    }
+                while let TokenKind::Ident(n) | TokenKind::TypeIdent(n) = self.peek().clone() {
+                    self.advance();
+                    names.push(n);
                     if *self.peek() == TokenKind::Comma {
                         self.advance();
                     } else {
@@ -967,7 +962,7 @@ impl Parser {
                     if *self.peek() == TokenKind::Pipe {
                         // Record update: { base_var | field: val, ... }
                         self.advance(); // consume '|'
-                        let base = Expr::Ident(name, span.clone());
+                        let base = Expr::Ident(name, span);
                         let mut updates = Vec::new();
                         loop {
                             if *self.peek() == TokenKind::RBrace {
@@ -1327,12 +1322,10 @@ impl Parser {
     }
 
     fn is_at_decl_start(&self) -> bool {
-        match self.peek() {
+        matches!(self.peek(),
             TokenKind::Fn | TokenKind::Type | TokenKind::Trait
             | TokenKind::Impl | TokenKind::Effect | TokenKind::Pub
-            | TokenKind::Vibe => true,
-            _ => false,
-        }
+            | TokenKind::Vibe)
     }
 
     fn parse_let_expr(&mut self) -> Result<Expr, ParseError> {
