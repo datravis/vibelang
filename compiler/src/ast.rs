@@ -25,6 +25,7 @@ pub enum ImportItems {
 pub enum Decl {
     Function(FnDecl),
     TypeDef(TypeDef),
+    NewtypeDef(NewtypeDef),
     TraitDef(TraitDef),
     ImplBlock(ImplBlock),
     EffectDef(EffectDef),
@@ -90,6 +91,15 @@ pub struct Variant {
 }
 
 #[derive(Debug, Clone)]
+pub struct NewtypeDef {
+    pub public: bool,
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub inner_type: TypeExpr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct TraitDef {
     pub name: String,
     pub type_params: Vec<String>,
@@ -121,6 +131,7 @@ pub enum Expr {
     IntLit(i64, Span),
     FloatLit(f64, Span),
     StringLit(String, Span),
+    StringInterp(Vec<StringPart>, Span), // "hello ${name}, age ${age}"
     CharLit(char, Span),
     BoolLit(bool, Span),
     UnitLit(Span),
@@ -148,6 +159,7 @@ pub enum Expr {
     // Control flow
     If(Box<Expr>, Box<Expr>, Option<Box<Expr>>, Span),
     Match(Box<Expr>, Vec<MatchArm>, Span),
+    When(Vec<WhenClause>, Span), // when { cond -> expr, ... }
     DoBlock(Vec<Expr>, Span),
 
     // Bindings
@@ -169,6 +181,12 @@ pub enum Expr {
     ChanSend(Box<Expr>, Box<Expr>, Span),        // send(channel, value)
     ChanRecv(Box<Expr>, Span),                   // recv(channel)
     VibePipeline(Box<Expr>, Vec<PipelineStage>, Span), // vibe: source |> stages |> terminal
+}
+
+#[derive(Debug, Clone)]
+pub enum StringPart {
+    Literal(String),
+    Expr(Expr),
 }
 
 #[derive(Debug, Clone)]
@@ -219,6 +237,7 @@ pub enum BinOp {
     Shl,
     Shr,
     Concat,
+    Compose, // >> function composition
 }
 
 #[derive(Debug, Clone)]
@@ -247,6 +266,12 @@ pub enum Pattern {
     Constructor(String, Vec<Pattern>, Span),
     Tuple(Vec<Pattern>, Span),
     Record(Vec<(String, Pattern)>, Span),
+}
+
+#[derive(Debug, Clone)]
+pub struct WhenClause {
+    pub condition: Expr,
+    pub body: Expr,
 }
 
 #[derive(Debug, Clone)]

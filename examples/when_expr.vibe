@@ -1,0 +1,31 @@
+--- When expression (guard-based conditional) example
+
+module when_expr
+
+fn classify(x: Int) -> String =
+    when {
+        x < 0 -> "negative",
+        x == 0 -> "zero",
+        x < 10 -> "small",
+        x < 100 -> "medium",
+        otherwise -> "large"
+    }
+
+fn fizzbuzz(n: Int) -> String =
+    when {
+        n % 15 == 0 -> "FizzBuzz",
+        n % 3 == 0 -> "Fizz",
+        n % 5 == 0 -> "Buzz",
+        otherwise -> show(n)
+    }
+
+fn main() -> Unit with IO = do
+    print(classify(-5))
+    print(classify(0))
+    print(classify(7))
+    print(classify(42))
+    print(classify(999))
+    print(fizzbuzz(15))
+    print(fizzbuzz(9))
+    print(fizzbuzz(10))
+    print(fizzbuzz(7))

@@ -1,0 +1,24 @@
+--- String interpolation and multi-line strings example
+
+module string_interpolation
+
+fn greet(name: String) -> String with IO =
+    "Hello, ${name}!"
+
+fn full_greeting(first: String, last: String) -> String =
+    "Welcome, ${first} ${last}!"
+
+fn format_score(player: String, score: Int) -> String =
+    "Player ${player} scored ${show(score)} points"
+
+fn main() -> Unit with IO = do
+    let greeting = greet("VibeLang")
+    print(greeting)
+    let msg = format_score("Alice", 42)
+    print(msg)
+
+--- Multi-line string example
+fn long_text() -> String =
+    """This is a multi-line
+string literal that spans
+multiple lines without escaping."""

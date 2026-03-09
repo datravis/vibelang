@@ -21,6 +21,11 @@ pub enum TokenKind {
     IntLit(i64),
     FloatLit(f64),
     StringLit(String),
+    /// Interpolated string: alternating literal parts and expression token sequences.
+    /// Parts are: (literal_before, Option<tokens_for_expr>). The last part has None.
+    StringInterpStart(String), // literal part before first ${
+    StringInterpPart(String),  // literal part between }...${
+    StringInterpEnd(String),   // literal part after last }
     CharLit(char),
     BoolLit(bool),
 
@@ -219,8 +224,16 @@ impl<'a> Lexer<'a> {
                 break;
             }
 
-            let tok = self.lex_token()?;
-            tokens.push(tok);
+            // String literals may produce multiple tokens (for interpolation)
+            if self.peek() == Some('"') {
+                let start = self.pos;
+                let start_line = self.line;
+                let start_col = self.col;
+                self.lex_string_tokens(start, start_line, start_col, &mut tokens)?;
+            } else {
+                let tok = self.lex_token()?;
+                tokens.push(tok);
+            }
         }
 
         Ok(tokens)
@@ -282,7 +295,8 @@ impl<'a> Lexer<'a> {
 
         let ch = self.peek().unwrap();
 
-        // String literals
+        // String literals - normally handled by lex_all via lex_string_tokens,
+        // but lex_token also handles them for recursive lexing (e.g., inside interpolation)
         if ch == '"' {
             return self.lex_string(start, start_line, start_col);
         }
@@ -306,15 +320,171 @@ impl<'a> Lexer<'a> {
         self.lex_operator(start, start_line, start_col)
     }
 
+    /// Lex a string literal, handling interpolation `${expr}` and triple-quoted strings `"""..."""`.
+    /// Pushes one or more tokens to `out`.
+    fn lex_string_tokens(
+        &mut self,
+        start: usize,
+        start_line: usize,
+        start_col: usize,
+        out: &mut Vec<Token>,
+    ) -> Result<(), LexError> {
+        self.advance(); // opening "
+
+        // Check for triple-quoted string """
+        if self.peek() == Some('"') && self.chars.get(self.pos + 1).copied() == Some('"') {
+            self.advance(); // second "
+            self.advance(); // third "
+            return self.lex_triple_string(start, start_line, start_col, out);
+        }
+
+        let mut s = String::new();
+        let mut has_interp = false;
+
+        loop {
+            match self.peek() {
+                Some('"') => {
+                    self.advance();
+                    if has_interp {
+                        out.push(Token {
+                            kind: TokenKind::StringInterpEnd(s),
+                            span: self.span_from(start, start_line, start_col),
+                        });
+                    } else {
+                        out.push(Token {
+                            kind: TokenKind::StringLit(s),
+                            span: self.span_from(start, start_line, start_col),
+                        });
+                    }
+                    return Ok(());
+                }
+                Some('$') if self.chars.get(self.pos + 1).copied() == Some('{') => {
+                    self.advance(); // $
+                    self.advance(); // {
+                    let kind = if !has_interp {
+                        has_interp = true;
+                        TokenKind::StringInterpStart(std::mem::take(&mut s))
+                    } else {
+                        TokenKind::StringInterpPart(std::mem::take(&mut s))
+                    };
+                    out.push(Token {
+                        kind,
+                        span: self.span_from(start, start_line, start_col),
+                    });
+                    // Lex the interpolated expression tokens until matching '}'
+                    let mut depth = 1;
+                    loop {
+                        self.skip_whitespace_and_comments();
+                        if self.pos >= self.chars.len() {
+                            return Err(LexError::UnterminatedString(start_line, start_col));
+                        }
+                        if self.peek() == Some('}') {
+                            depth -= 1;
+                            if depth == 0 {
+                                self.advance(); // consume closing }
+                                break;
+                            }
+                        }
+                        let tok = self.lex_token()?;
+                        match &tok.kind {
+                            TokenKind::LBrace => depth += 1,
+                            TokenKind::RBrace => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        out.push(tok);
+                    }
+                }
+                Some('\\') => {
+                    self.advance();
+                    match self.advance() {
+                        Some('n') => s.push('\n'),
+                        Some('t') => s.push('\t'),
+                        Some('r') => s.push('\r'),
+                        Some('\\') => s.push('\\'),
+                        Some('"') => s.push('"'),
+                        Some('0') => s.push('\0'),
+                        Some('$') => s.push('$'),
+                        Some(c) => {
+                            s.push('\\');
+                            s.push(c);
+                        }
+                        None => return Err(LexError::UnterminatedString(start_line, start_col)),
+                    }
+                }
+                Some(c) => {
+                    self.advance();
+                    s.push(c);
+                }
+                None => return Err(LexError::UnterminatedString(start_line, start_col)),
+            }
+        }
+    }
+
+    /// Lex a triple-quoted (multi-line) string literal `"""..."""`.
+    fn lex_triple_string(
+        &mut self,
+        start: usize,
+        start_line: usize,
+        start_col: usize,
+        out: &mut Vec<Token>,
+    ) -> Result<(), LexError> {
+        let mut s = String::new();
+        loop {
+            match self.peek() {
+                Some('"')
+                    if self.chars.get(self.pos + 1).copied() == Some('"')
+                        && self.chars.get(self.pos + 2).copied() == Some('"') =>
+                {
+                    self.advance(); // "
+                    self.advance(); // "
+                    self.advance(); // "
+                    out.push(Token {
+                        kind: TokenKind::StringLit(s),
+                        span: self.span_from(start, start_line, start_col),
+                    });
+                    return Ok(());
+                }
+                Some('\\') => {
+                    self.advance();
+                    match self.advance() {
+                        Some('n') => s.push('\n'),
+                        Some('t') => s.push('\t'),
+                        Some('r') => s.push('\r'),
+                        Some('\\') => s.push('\\'),
+                        Some('"') => s.push('"'),
+                        Some('0') => s.push('\0'),
+                        Some(c) => {
+                            s.push('\\');
+                            s.push(c);
+                        }
+                        None => return Err(LexError::UnterminatedString(start_line, start_col)),
+                    }
+                }
+                Some(c) => {
+                    self.advance();
+                    s.push(c);
+                }
+                None => return Err(LexError::UnterminatedString(start_line, start_col)),
+            }
+        }
+    }
+
+    /// Legacy lex_string for use by lex_token (non-interpolated path).
     fn lex_string(
         &mut self,
         start: usize,
         start_line: usize,
         start_col: usize,
     ) -> Result<Token, LexError> {
+        // This should not be called from lex_all anymore (string handling moved to lex_string_tokens),
+        // but kept for backwards compatibility with direct lex_token calls.
         self.advance(); // opening "
         let mut s = String::new();
-
         loop {
             match self.advance() {
                 Some('"') => {
@@ -741,6 +911,31 @@ mod tests {
         let tokens = lex("foo {- block comment -} bar").unwrap();
         assert_eq!(tokens[0].kind, TokenKind::Ident("foo".into()));
         assert_eq!(tokens[1].kind, TokenKind::Ident("bar".into()));
+    }
+
+    #[test]
+    fn test_string_interpolation() {
+        let tokens = lex(r#""hello ${name}""#).unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::StringInterpStart(ref s) if s == "hello "));
+        assert!(matches!(tokens[1].kind, TokenKind::Ident(ref s) if s == "name"));
+        assert!(matches!(tokens[2].kind, TokenKind::StringInterpEnd(ref s) if s == ""));
+    }
+
+    #[test]
+    fn test_string_interpolation_multiple() {
+        let tokens = lex(r#""${a} and ${b}""#).unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::StringInterpStart(ref s) if s == ""));
+        assert!(matches!(tokens[1].kind, TokenKind::Ident(ref s) if s == "a"));
+        assert!(matches!(tokens[2].kind, TokenKind::StringInterpPart(ref s) if s == " and "));
+        assert!(matches!(tokens[3].kind, TokenKind::Ident(ref s) if s == "b"));
+        assert!(matches!(tokens[4].kind, TokenKind::StringInterpEnd(ref s) if s == ""));
+    }
+
+    #[test]
+    fn test_triple_quoted_string() {
+        let tokens = lex(r#""""hello
+world""""#).unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::StringLit(ref s) if s == "hello\nworld"));
     }
 
     #[test]

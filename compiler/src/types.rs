@@ -293,6 +293,15 @@ impl TypeChecker {
             Expr::BoolLit(_, _) => Ok(Type::Bool),
             Expr::UnitLit(_) => Ok(Type::Unit),
 
+            Expr::StringInterp(parts, _) => {
+                for part in parts {
+                    if let StringPart::Expr(e) = part {
+                        self.check_expr(e)?;
+                    }
+                }
+                Ok(Type::String)
+            }
+
             Expr::Ident(name, _) => self
                 .lookup(name)
                 .cloned()
@@ -353,6 +362,15 @@ impl TypeChecker {
                         Ok(Type::Int)
                     }
                     BinOp::Concat => Ok(lt),
+                    BinOp::Compose => {
+                        // f >> g composes two functions: result is a function
+                        match (&lt, &rt) {
+                            (Type::Fn(params, _), Type::Fn(_, ret)) => {
+                                Ok(Type::Fn(params.clone(), ret.clone()))
+                            }
+                            _ => Ok(Type::Unknown),
+                        }
+                    }
                 }
             }
 
@@ -424,6 +442,15 @@ impl TypeChecker {
                     }
                     result_type = self.check_expr(&arm.body)?;
                     self.pop_scope();
+                }
+                Ok(result_type)
+            }
+
+            Expr::When(clauses, _) => {
+                let mut result_type = Type::Unit;
+                for clause in clauses {
+                    self.check_expr(&clause.condition)?;
+                    result_type = self.check_expr(&clause.body)?;
                 }
                 Ok(result_type)
             }
@@ -621,8 +648,24 @@ pub fn check(module: &Module) -> Result<(), TypeError> {
 
     // First pass: register all type definitions
     for decl in &module.declarations {
-        if let Decl::TypeDef(td) = decl {
-            checker.type_defs.insert(td.name.clone(), td.clone());
+        match decl {
+            Decl::TypeDef(td) => {
+                checker.type_defs.insert(td.name.clone(), td.clone());
+            }
+            Decl::NewtypeDef(nt) => {
+                // Register newtype as a named type wrapping its inner type
+                checker.type_defs.insert(
+                    nt.name.clone(),
+                    TypeDef {
+                        public: nt.public,
+                        name: nt.name.clone(),
+                        type_params: nt.type_params.clone(),
+                        body: TypeBody::Alias(nt.inner_type.clone()),
+                        span: nt.span,
+                    },
+                );
+            }
+            _ => {}
         }
     }
 

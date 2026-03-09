@@ -121,6 +121,14 @@ impl EscapeAnalyzer {
             | Expr::BoolLit(_, _)
             | Expr::UnitLit(_) => {}
 
+            Expr::StringInterp(parts, _) => {
+                for part in parts {
+                    if let crate::ast::StringPart::Expr(e) = part {
+                        self.analyze_expr(e, false);
+                    }
+                }
+            }
+
             Expr::Ident(name, _) => {
                 self.mark_used(name);
                 if is_tail {
@@ -210,6 +218,13 @@ impl EscapeAnalyzer {
                     }
                     self.analyze_expr(&arm.body, is_tail);
                     self.scope_depth -= 1;
+                }
+            }
+
+            Expr::When(clauses, _) => {
+                for clause in clauses {
+                    self.analyze_expr(&clause.condition, false);
+                    self.analyze_expr(&clause.body, is_tail);
                 }
             }
 
