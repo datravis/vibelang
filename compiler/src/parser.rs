@@ -1071,6 +1071,70 @@ impl Parser {
                 Ok(Expr::Pmap(Box::new(collection), Box::new(func), span))
             }
 
+            // Pfilter expression: pfilter(collection, predicate)
+            TokenKind::Pfilter => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let collection = self.parse_expr()?;
+                self.expect(&TokenKind::Comma)?;
+                let func = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::Pfilter(Box::new(collection), Box::new(func), span))
+            }
+
+            // Preduce expression: preduce(collection, init, function)
+            TokenKind::Preduce => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let collection = self.parse_expr()?;
+                self.expect(&TokenKind::Comma)?;
+                let init = self.parse_expr()?;
+                self.expect(&TokenKind::Comma)?;
+                let func = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::Preduce(Box::new(collection), Box::new(init), Box::new(func), span))
+            }
+
+            // Race expression: race(expr1, expr2, ...)
+            TokenKind::Race => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let mut exprs = vec![self.parse_expr()?];
+                while *self.peek() == TokenKind::Comma {
+                    self.advance();
+                    if *self.peek() == TokenKind::RParen {
+                        break;
+                    }
+                    exprs.push(self.parse_expr()?);
+                }
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::Race(exprs, span))
+            }
+
+            // Channel operations
+            TokenKind::SendChan => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let channel = self.parse_expr()?;
+                self.expect(&TokenKind::Comma)?;
+                let value = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::ChanSend(Box::new(channel), Box::new(value), span))
+            }
+
+            TokenKind::Recv => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let channel = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::ChanRecv(Box::new(channel), span))
+            }
+
             // Backslash lambda: \x -> body
             TokenKind::Backslash => {
                 let span = self.span();

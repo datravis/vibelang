@@ -1,0 +1,28 @@
+module main
+
+-- Parallel filter and reduce over lists
+
+fn is_even(x: Int) -> Bool = x % 2 == 0
+
+fn add(a: Int, b: Int) -> Int = a + b
+
+fn main() -> Int = do
+    -- Build a list [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    let nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    -- Parallel filter: keep only even numbers
+    let evens = pfilter(nums, fn(x: Int) -> Bool = x % 2 == 0)
+    print("Even numbers (pfilter):")
+    print(evens)
+
+    -- Parallel reduce: sum all numbers
+    let total = preduce(nums, 0, fn(a: Int, b: Int) -> Int = a + b)
+    print("Sum (preduce):")
+    print(total)
+
+    -- Combine: parallel filter then parallel reduce
+    let even_sum = preduce(pfilter(nums, fn(x: Int) -> Bool = x % 2 == 0), 0, fn(a: Int, b: Int) -> Int = a + b)
+    print("Sum of evens:")
+    print(even_sum)
+
+    0

@@ -1,0 +1,35 @@
+module main
+
+-- Race: first computation to finish wins
+-- Useful for redundant queries, fallback strategies, etc.
+
+fn slow_compute() -> Int = do
+    let x = 1000 * 1000
+    x + 42
+
+fn fast_compute() -> Int = do
+    let y = 2 + 2
+    y
+
+fn medium_compute() -> Int = do
+    let z = 500 * 500
+    z + 7
+
+fn main() -> Int = do
+    -- Race three computations — fastest result wins
+    let winner = race(
+        fn() = slow_compute(),
+        fn() = fast_compute(),
+        fn() = medium_compute(),
+    )
+    print("Race winner:")
+    print(winner)
+
+    -- Race two computations
+    let result = race(
+        fn() = 100 * 100,
+        fn() = 200 * 200,
+    )
+    print("Second race:")
+    print(result)
+    0

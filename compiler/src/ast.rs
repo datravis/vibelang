@@ -162,6 +162,12 @@ pub enum Expr {
     // Concurrency
     Par(Vec<Expr>, Span),                        // par(expr1, expr2, ...)
     Pmap(Box<Expr>, Box<Expr>, Span),            // pmap(collection, function)
+    Pfilter(Box<Expr>, Box<Expr>, Span),         // pfilter(collection, predicate)
+    Preduce(Box<Expr>, Box<Expr>, Box<Expr>, Span), // preduce(collection, init, function)
+    Race(Vec<Expr>, Span),                       // race(expr1, expr2, ...)
+    ChanCreate(Box<Expr>, Span),                 // create_channel(capacity)
+    ChanSend(Box<Expr>, Box<Expr>, Span),        // send(channel, value)
+    ChanRecv(Box<Expr>, Span),                   // recv(channel)
     VibePipeline(Box<Expr>, Vec<PipelineStage>, Span), // vibe: source |> stages |> terminal
 }
 

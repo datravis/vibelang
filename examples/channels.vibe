@@ -1,0 +1,35 @@
+module main
+
+-- Channels: typed bounded communication between concurrent tasks
+-- Demonstrates producer-consumer pattern with par + channels
+
+fn producer(ch: Int) -> Int = do
+    send(ch, 1)
+    send(ch, 2)
+    send(ch, 3)
+    send(ch, 4)
+    send(ch, 5)
+    close(ch)
+    0
+
+fn consumer(ch: Int) -> Int = do
+    let a = recv(ch)
+    let b = recv(ch)
+    let c = recv(ch)
+    let d = recv(ch)
+    let e = recv(ch)
+    a + b + c + d + e
+
+fn main() -> Int = do
+    -- Create a bounded channel with capacity 10
+    let ch = create_channel(10)
+
+    -- Producer and consumer run in parallel
+    let results = par(
+        fn() = producer(ch),
+        fn() = consumer(ch),
+    )
+
+    print("Channel sum (expect 15):")
+    print(results)
+    0

@@ -195,6 +195,16 @@ impl TypeChecker {
             Type::Fn(vec![fn_t.clone()], Box::new(list_t)),
         );
 
+        // Channel operations
+        env.insert(
+            "create_channel".into(),
+            Type::Fn(vec![Type::Int], Box::new(Type::Int)),
+        );
+        env.insert(
+            "close".into(),
+            Type::Fn(vec![Type::Int], Box::new(Type::Unit)),
+        );
+
         Self {
             env: vec![env],
             type_defs: HashMap::new(),
@@ -485,6 +495,43 @@ impl TypeChecker {
                 let col_type = self.check_expr(collection)?;
                 self.check_expr(func)?;
                 Ok(col_type)
+            }
+
+            Expr::Pfilter(collection, func, _) => {
+                let col_type = self.check_expr(collection)?;
+                self.check_expr(func)?;
+                Ok(col_type)
+            }
+
+            Expr::Preduce(collection, init, func, _) => {
+                self.check_expr(collection)?;
+                let init_type = self.check_expr(init)?;
+                self.check_expr(func)?;
+                Ok(init_type)
+            }
+
+            Expr::Race(exprs, _) => {
+                let mut result_type = Type::Unknown;
+                for expr in exprs {
+                    result_type = self.check_expr(expr)?;
+                }
+                Ok(result_type)
+            }
+
+            Expr::ChanCreate(capacity, _) => {
+                self.check_expr(capacity)?;
+                Ok(Type::Int)
+            }
+
+            Expr::ChanSend(channel, value, _) => {
+                self.check_expr(channel)?;
+                self.check_expr(value)?;
+                Ok(Type::Unit)
+            }
+
+            Expr::ChanRecv(channel, _) => {
+                self.check_expr(channel)?;
+                Ok(Type::Int)
             }
 
             Expr::VibePipeline(source, _stages, _) => {

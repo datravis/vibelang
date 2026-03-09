@@ -58,6 +58,9 @@ lex_test!(lex_types, "types.vibe");
 lex_test!(lex_variants, "variants.vibe");
 lex_test!(lex_vibe_pipeline, "vibe_pipeline.vibe");
 lex_test!(lex_concurrency, "concurrency.vibe");
+lex_test!(lex_race, "race.vibe");
+lex_test!(lex_pfilter_preduce, "pfilter_preduce.vibe");
+lex_test!(lex_channels, "channels.vibe");
 
 // ── Parser tests ─────────────────────────────────────────────────────
 
@@ -93,6 +96,9 @@ parse_test!(parse_types, "types.vibe");
 parse_test!(parse_variants, "variants.vibe");
 parse_test!(parse_vibe_pipeline, "vibe_pipeline.vibe");
 parse_test!(parse_concurrency, "concurrency.vibe");
+parse_test!(parse_race, "race.vibe");
+parse_test!(parse_pfilter_preduce, "pfilter_preduce.vibe");
+parse_test!(parse_channels, "channels.vibe");
 
 // ── Type-checker tests ───────────────────────────────────────────────
 
@@ -123,3 +129,6 @@ typecheck_test!(typecheck_types, "types.vibe");
 typecheck_test!(typecheck_variants, "variants.vibe");
 typecheck_test!(typecheck_vibe_pipeline, "vibe_pipeline.vibe");
 typecheck_test!(typecheck_concurrency, "concurrency.vibe");
+typecheck_test!(typecheck_race, "race.vibe");
+typecheck_test!(typecheck_pfilter_preduce, "pfilter_preduce.vibe");
+typecheck_test!(typecheck_channels, "channels.vibe");
