@@ -74,6 +74,17 @@ lex_test!(lex_trait_bounds, "trait_bounds.vibe");
 lex_test!(lex_builtin_traits, "builtin_traits.vibe");
 lex_test!(lex_number_literals, "number_literals.vibe");
 lex_test!(lex_let_else, "let_else.vibe");
+lex_test!(lex_partial_application, "partial_application.vibe");
+lex_test!(lex_for_comprehension, "for_comprehension.vibe");
+lex_test!(lex_else_if, "else_if.vibe");
+lex_test!(lex_state_effect, "state_effect.vibe");
+lex_test!(lex_fail_effect, "fail_effect.vibe");
+lex_test!(lex_effect_polymorphism, "effect_polymorphism.vibe");
+lex_test!(lex_doc_comments, "doc_comments.vibe");
+lex_test!(lex_type_aliases, "type_aliases.vibe");
+lex_test!(lex_prelude_functions, "prelude_functions.vibe");
+lex_test!(lex_test_decl, "test_decl.vibe");
+lex_test!(lex_lambda_shorthand, "lambda_shorthand.vibe");
 
 // ── Parser tests ─────────────────────────────────────────────────────
 
@@ -125,6 +136,17 @@ parse_test!(parse_trait_bounds, "trait_bounds.vibe");
 parse_test!(parse_builtin_traits, "builtin_traits.vibe");
 parse_test!(parse_number_literals, "number_literals.vibe");
 parse_test!(parse_let_else, "let_else.vibe");
+parse_test!(parse_partial_application, "partial_application.vibe");
+parse_test!(parse_for_comprehension, "for_comprehension.vibe");
+parse_test!(parse_else_if, "else_if.vibe");
+parse_test!(parse_state_effect, "state_effect.vibe");
+parse_test!(parse_fail_effect, "fail_effect.vibe");
+parse_test!(parse_effect_polymorphism, "effect_polymorphism.vibe");
+parse_test!(parse_doc_comments, "doc_comments.vibe");
+parse_test!(parse_type_aliases, "type_aliases.vibe");
+parse_test!(parse_prelude_functions, "prelude_functions.vibe");
+parse_test!(parse_test_decl, "test_decl.vibe");
+parse_test!(parse_lambda_shorthand, "lambda_shorthand.vibe");
 
 // ── Type-checker tests ───────────────────────────────────────────────
 
@@ -171,3 +193,14 @@ typecheck_test!(typecheck_trait_bounds, "trait_bounds.vibe");
 typecheck_test!(typecheck_builtin_traits, "builtin_traits.vibe");
 typecheck_test!(typecheck_number_literals, "number_literals.vibe");
 typecheck_test!(typecheck_let_else, "let_else.vibe");
+typecheck_test!(typecheck_partial_application, "partial_application.vibe");
+typecheck_test!(typecheck_for_comprehension, "for_comprehension.vibe");
+typecheck_test!(typecheck_else_if, "else_if.vibe");
+typecheck_test!(typecheck_state_effect, "state_effect.vibe");
+typecheck_test!(typecheck_fail_effect, "fail_effect.vibe");
+typecheck_test!(typecheck_effect_polymorphism, "effect_polymorphism.vibe");
+typecheck_test!(typecheck_doc_comments, "doc_comments.vibe");
+typecheck_test!(typecheck_type_aliases, "type_aliases.vibe");
+typecheck_test!(typecheck_prelude_functions, "prelude_functions.vibe");
+typecheck_test!(typecheck_test_decl, "test_decl.vibe");
+typecheck_test!(typecheck_lambda_shorthand, "lambda_shorthand.vibe");

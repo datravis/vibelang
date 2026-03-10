@@ -1,0 +1,5 @@
+-- For comprehensions: transform collections
+fn main() -> Unit = do
+    let xs = [1, 2, 3, 4, 5]
+    let doubled = for x in xs do x * 2
+    print(doubled)

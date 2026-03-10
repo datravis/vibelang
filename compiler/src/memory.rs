@@ -190,6 +190,23 @@ impl EscapeAnalyzer {
                 }
             }
 
+            Expr::PartialApp(func, args, _) => {
+                self.analyze_expr(func, false);
+                for a in args {
+                    if let Some(expr) = a {
+                        self.analyze_expr(expr, false);
+                    }
+                }
+            }
+
+            Expr::For(var_name, collection, body, _) => {
+                self.analyze_expr(collection, false);
+                self.scope_depth += 1;
+                self.define(var_name);
+                self.analyze_expr(body, is_tail);
+                self.scope_depth -= 1;
+            }
+
             Expr::Lambda(params, body, _) => {
                 // Variables captured by lambdas escape the function
                 self.scope_depth += 1;

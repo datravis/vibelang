@@ -31,6 +31,14 @@ pub enum Decl {
     ImplBlock(ImplBlock),
     EffectDef(EffectDef),
     VibeDecl(VibeDecl),
+    TestDecl(TestDecl),
+}
+
+#[derive(Debug, Clone)]
+pub struct TestDecl {
+    pub name: String,
+    pub body: Expr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -174,11 +182,13 @@ pub enum Expr {
     // Function related
     Call(Box<Expr>, Vec<Expr>, Span),
     Lambda(Vec<Param>, Box<Expr>, Span),
+    PartialApp(Box<Expr>, Vec<Option<Expr>>, Span), // f(_, 5) — None = placeholder
 
     // Control flow
     If(Box<Expr>, Box<Expr>, Option<Box<Expr>>, Span),
     Match(Box<Expr>, Vec<MatchArm>, Span),
     When(Vec<WhenClause>, Span), // when { cond -> expr, ... }
+    For(String, Box<Expr>, Box<Expr>, Span), // for x in collection do body
     DoBlock(Vec<Expr>, Span),
 
     // Bindings

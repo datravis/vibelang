@@ -1,0 +1,12 @@
+-- Multi-branch if-else expressions
+fn classify(age: Int) -> String =
+    if age < 13 then "child"
+    else if age < 20 then "teenager"
+    else if age < 65 then "adult"
+    else "senior"
+
+fn main() -> Unit = do
+    print(classify(8))
+    print(classify(16))
+    print(classify(40))
+    print(classify(70))

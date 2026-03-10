@@ -1,0 +1,14 @@
+-- Test declarations
+fn add(a: Int, b: Int) -> Int = a + b
+
+test("addition works", fn() = do
+    let result = add(2, 3)
+    assert(result == 5, "2 + 3 should equal 5")
+)
+
+test("identity property", fn() = do
+    let x = identity(42)
+    assert(x == 42, "identity should return its argument")
+)
+
+fn main() -> Unit = print(add(1, 2))

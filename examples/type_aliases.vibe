@@ -1,0 +1,12 @@
+-- Type aliases for common patterns
+type alias Predicate = fn(Int) -> Bool
+type alias Transform = fn(Int) -> Int
+
+fn apply_transform(f: fn(Int) -> Int, x: Int) -> Int = f(x)
+
+fn is_positive(n: Int) -> Bool = n > 0
+
+fn main() -> Unit = do
+    let doubled = apply_transform(fn(x) = x * 2, 21)
+    print(doubled)
+    print(is_positive(42))

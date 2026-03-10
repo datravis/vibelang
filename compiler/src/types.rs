@@ -113,9 +113,35 @@ impl TypeChecker {
             "split".into(),
             Type::Fn(vec![Type::String], Box::new(Type::List(Box::new(Type::String)))),
         );
+        // Ordering type constructors
+        env.insert("Less".into(), Type::Named("Ordering".into(), Vec::new()));
+        env.insert("Equal".into(), Type::Named("Ordering".into(), Vec::new()));
+        env.insert("Greater".into(), Type::Named("Ordering".into(), Vec::new()));
+
         env.insert("identity".into(), Type::Fn(vec![Type::Unknown], Box::new(Type::Unknown)));
         env.insert("panic".into(), Type::Fn(vec![Type::String], Box::new(Type::Never)));
-        env.insert("todo".into(), Type::Fn(vec![], Box::new(Type::Never)));
+        env.insert("todo".into(), Type::Fn(vec![Type::String], Box::new(Type::Never)));
+        env.insert("assert".into(), Type::Fn(vec![Type::Bool, Type::String], Box::new(Type::Unit)));
+        env.insert("const".into(), Type::Fn(vec![Type::Unknown, Type::Unknown], Box::new(Type::Unknown)));
+        env.insert("flip".into(), Type::Fn(vec![Type::Unknown], Box::new(Type::Unknown)));
+        env.insert("compose".into(), Type::Fn(vec![Type::Unknown, Type::Unknown], Box::new(Type::Unknown)));
+        env.insert("range".into(), Type::Fn(vec![Type::Int, Type::Int], Box::new(Type::List(Box::new(Type::Int)))));
+        env.insert("abs".into(), Type::Fn(vec![Type::Int], Box::new(Type::Int)));
+        env.insert("min".into(), Type::Fn(vec![Type::Int, Type::Int], Box::new(Type::Int)));
+        env.insert("max".into(), Type::Fn(vec![Type::Int, Type::Int], Box::new(Type::Int)));
+        env.insert("to_string".into(), Type::Fn(vec![Type::Unknown], Box::new(Type::String)));
+        env.insert("to_upper".into(), Type::Fn(vec![Type::String], Box::new(Type::String)));
+        env.insert("trim".into(), Type::Fn(vec![Type::String], Box::new(Type::String)));
+        env.insert("join".into(), Type::Fn(vec![Type::List(Box::new(Type::String)), Type::String], Box::new(Type::String)));
+        env.insert("contains".into(), Type::Fn(vec![Type::String, Type::String], Box::new(Type::Bool)));
+        env.insert("starts_with".into(), Type::Fn(vec![Type::String, Type::String], Box::new(Type::Bool)));
+        env.insert("ends_with".into(), Type::Fn(vec![Type::String, Type::String], Box::new(Type::Bool)));
+        env.insert("is_empty".into(), Type::Fn(vec![Type::String], Box::new(Type::Bool)));
+        env.insert("replace".into(), Type::Fn(vec![Type::String, Type::String, Type::String], Box::new(Type::String)));
+        env.insert("substring".into(), Type::Fn(vec![Type::String, Type::Int, Type::Int], Box::new(Type::String)));
+        env.insert("chars".into(), Type::Fn(vec![Type::String], Box::new(Type::List(Box::new(Type::Char)))));
+        env.insert("parse_int".into(), Type::Fn(vec![Type::String], Box::new(Type::Unknown)));
+        env.insert("parse_float".into(), Type::Fn(vec![Type::String], Box::new(Type::Unknown)));
         env.insert(
             "read_lines".into(),
             Type::Fn(vec![Type::String], Box::new(Type::List(Box::new(Type::String)))),
@@ -265,12 +291,33 @@ impl TypeChecker {
             ("default".into(), vec![], Type::Unknown),
         ]);
 
+        // Built-in effect definitions
+        let mut effect_defs = HashMap::new();
+        let mut effect_ops = HashMap::new();
+
+        // State effect: get() -> S, put(s: S) -> Unit
+        effect_defs.insert("State".into(), vec![
+            ("get".into(), vec![], Type::Unknown),
+            ("put".into(), vec![Type::Unknown], Type::Unit),
+        ]);
+        effect_ops.insert("get".into(), ("State".into(), vec![], Type::Unknown));
+        effect_ops.insert("put".into(), ("State".into(), vec![Type::Unknown], Type::Unit));
+        env.insert("get".into(), Type::Fn(vec![], Box::new(Type::Unknown)));
+        env.insert("put".into(), Type::Fn(vec![Type::Unknown], Box::new(Type::Unit)));
+
+        // Fail effect: raise(err: E) -> Never
+        effect_defs.insert("Fail".into(), vec![
+            ("raise".into(), vec![Type::Unknown], Type::Never),
+        ]);
+        effect_ops.insert("raise".into(), ("Fail".into(), vec![Type::Unknown], Type::Never));
+        env.insert("raise".into(), Type::Fn(vec![Type::Unknown], Box::new(Type::Never)));
+
         Self {
             env: vec![env],
             type_defs: HashMap::new(),
             nominal_types: HashMap::new(),
-            effect_defs: HashMap::new(),
-            effect_ops: HashMap::new(),
+            effect_defs,
+            effect_ops,
             trait_defs,
             trait_impls: HashMap::new(),
             next_var: 0,
@@ -464,6 +511,25 @@ impl TypeChecker {
                 }
             }
 
+            Expr::PartialApp(func, args, _) => {
+                let ft = self.check_expr(func)?;
+                for arg in args {
+                    if let Some(expr) = arg {
+                        self.check_expr(expr)?;
+                    }
+                }
+                // Partial application returns a function over the remaining (placeholder) params
+                match ft {
+                    Type::Fn(param_types, ret) => {
+                        let remaining: Vec<Type> = param_types.iter().zip(args.iter())
+                            .filter_map(|(pt, a)| if a.is_none() { Some(pt.clone()) } else { None })
+                            .collect();
+                        Ok(Type::Fn(remaining, ret))
+                    }
+                    _ => Ok(Type::Unknown),
+                }
+            }
+
             Expr::Lambda(params, body, _) => {
                 self.push_scope();
                 let param_types: Vec<Type> = params
@@ -514,6 +580,20 @@ impl TypeChecker {
                     result_type = self.check_expr(&clause.body)?;
                 }
                 Ok(result_type)
+            }
+
+            Expr::For(var_name, collection, body, _) => {
+                let col_type = self.check_expr(collection)?;
+                self.push_scope();
+                // Bind the loop variable to the element type
+                let elem_type = match &col_type {
+                    Type::List(inner) => *inner.clone(),
+                    _ => Type::Unknown,
+                };
+                self.define(var_name.clone(), elem_type);
+                let body_type = self.check_expr(body)?;
+                self.pop_scope();
+                Ok(Type::List(Box::new(body_type)))
             }
 
             Expr::DoBlock(exprs, _) => {
@@ -940,6 +1020,9 @@ pub fn check(module: &Module) -> Result<(), TypeError> {
                 for method in &ib.methods {
                     checker.check_fn_decl(method)?;
                 }
+            }
+            Decl::TestDecl(t) => {
+                checker.check_expr(&t.body)?;
             }
             _ => {}
         }

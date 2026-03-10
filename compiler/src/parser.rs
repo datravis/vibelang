@@ -22,6 +22,11 @@ struct Parser {
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
+        // Filter out doc comments — they don't affect parsing
+        let tokens: Vec<Token> = tokens
+            .into_iter()
+            .filter(|t| !matches!(t.kind, TokenKind::DocComment(_)))
+            .collect();
         Self { tokens, pos: 0 }
     }
 
@@ -212,13 +217,14 @@ impl Parser {
             TokenKind::Impl => Ok(Decl::ImplBlock(self.parse_impl_block()?)),
             TokenKind::Effect => Ok(Decl::EffectDef(self.parse_effect_def()?)),
             TokenKind::Vibe => Ok(Decl::VibeDecl(self.parse_vibe_decl()?)),
+            TokenKind::Test => Ok(Decl::TestDecl(self.parse_test_decl()?)),
             _ => {
                 let span = self.span();
                 Err(ParseError::Unexpected(
                     format!("{}", self.peek()),
                     span.line,
                     span.col,
-                    "declaration (fn, type, newtype, nominal, trait, impl, effect)".into(),
+                    "declaration (fn, type, newtype, nominal, trait, impl, effect, test)".into(),
                 ))
             }
         }
@@ -833,6 +839,30 @@ impl Parser {
         })
     }
 
+    fn parse_test_decl(&mut self) -> Result<TestDecl, ParseError> {
+        let span = self.expect(&TokenKind::Test)?;
+        self.expect(&TokenKind::LParen)?;
+        let name = match self.peek().clone() {
+            TokenKind::StringLit(s) => {
+                self.advance();
+                s
+            }
+            _ => {
+                let sp = self.span();
+                return Err(ParseError::Unexpected(
+                    format!("{}", self.peek()),
+                    sp.line,
+                    sp.col,
+                    "string literal (test name)".into(),
+                ));
+            }
+        };
+        self.expect(&TokenKind::Comma)?;
+        let body = self.parse_expr()?;
+        self.expect(&TokenKind::RParen)?;
+        Ok(TestDecl { name, body, span })
+    }
+
     // ---- Expressions ----
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
@@ -983,19 +1013,37 @@ impl Parser {
                 TokenKind::LParen => {
                     let span = self.span();
                     self.advance();
-                    let mut args = Vec::new();
+                    let mut args: Vec<Option<Expr>> = Vec::new();
+                    let mut has_placeholder = false;
                     if *self.peek() != TokenKind::RParen {
-                        args.push(self.parse_expr()?);
+                        if *self.peek() == TokenKind::Underscore {
+                            self.advance();
+                            args.push(None);
+                            has_placeholder = true;
+                        } else {
+                            args.push(Some(self.parse_expr()?));
+                        }
                         while *self.peek() == TokenKind::Comma {
                             self.advance();
                             if *self.peek() == TokenKind::RParen {
                                 break;
                             }
-                            args.push(self.parse_expr()?);
+                            if *self.peek() == TokenKind::Underscore {
+                                self.advance();
+                                args.push(None);
+                                has_placeholder = true;
+                            } else {
+                                args.push(Some(self.parse_expr()?));
+                            }
                         }
                     }
                     self.expect(&TokenKind::RParen)?;
-                    expr = Expr::Call(Box::new(expr), args, span);
+                    if has_placeholder {
+                        expr = Expr::PartialApp(Box::new(expr), args, span);
+                    } else {
+                        let concrete_args: Vec<Expr> = args.into_iter().map(|a| a.unwrap()).collect();
+                        expr = Expr::Call(Box::new(expr), concrete_args, span);
+                    }
                 }
                 TokenKind::Dot => {
                     let span = self.span();
@@ -1197,6 +1245,18 @@ impl Parser {
             // Do block
             TokenKind::Do => self.parse_do_block(),
 
+            // For comprehension: for x in collection do body
+            TokenKind::For => {
+                let span = self.span();
+                self.advance();
+                let (var_name, _) = self.expect_ident()?;
+                self.expect(&TokenKind::In)?;
+                let collection = self.parse_expr()?;
+                self.expect(&TokenKind::Do)?;
+                let body = self.parse_expr()?;
+                Ok(Expr::For(var_name, Box::new(collection), Box::new(body), span))
+            }
+
             // Let expression
             TokenKind::Let => self.parse_let_expr(),
 
@@ -1358,7 +1418,8 @@ impl Parser {
                     type_ann: None,
                     span: pspan,
                 });
-                while let TokenKind::Ident(_) = self.peek() {
+                while *self.peek() == TokenKind::Comma {
+                    self.advance();
                     let (name, pspan) = self.expect_ident()?;
                     params.push(Param {
                         name,
@@ -1571,7 +1632,7 @@ impl Parser {
         matches!(self.peek(),
             TokenKind::Fn | TokenKind::Type | TokenKind::Newtype | TokenKind::Nominal
             | TokenKind::Trait | TokenKind::Impl | TokenKind::Effect | TokenKind::Pub
-            | TokenKind::Vibe)
+            | TokenKind::Vibe | TokenKind::Test)
     }
 
     fn parse_let_expr(&mut self) -> Result<Expr, ParseError> {

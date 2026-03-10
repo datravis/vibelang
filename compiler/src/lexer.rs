@@ -125,6 +125,7 @@ pub enum TokenKind {
     Underscore,
 
     // Special
+    DocComment(String), // --- doc comment content
     Eof,
 }
 
@@ -253,10 +254,13 @@ impl<'a> Lexer<'a> {
                 }
             }
 
-            // Skip line comments: --
+            // Skip line comments: -- (but not doc comments: ---)
             if self.peek() == Some('-') && self.peek_next() == Some('-') {
-                // Check it's not a doc comment that we might want to preserve
-                // For now, skip all -- comments
+                // Check for doc comment (---)
+                if self.chars.get(self.pos + 2).copied() == Some('-') {
+                    // Doc comment — don't skip, let lex_all handle it
+                    break;
+                }
                 while let Some(ch) = self.advance() {
                     if ch == '\n' {
                         break;
@@ -312,6 +316,30 @@ impl<'a> Lexer<'a> {
         // Number literals
         if ch.is_ascii_digit() {
             return self.lex_number(start, start_line, start_col);
+        }
+
+        // Doc comments: ---
+        if ch == '-' && self.peek_next() == Some('-') && self.chars.get(self.pos + 2).copied() == Some('-') {
+            self.advance(); // -
+            self.advance(); // -
+            self.advance(); // -
+            // Skip optional leading space
+            if self.peek() == Some(' ') {
+                self.advance();
+            }
+            let mut content = String::new();
+            while let Some(c) = self.peek() {
+                if c == '\n' {
+                    self.advance();
+                    break;
+                }
+                content.push(c);
+                self.advance();
+            }
+            return Ok(Token {
+                kind: TokenKind::DocComment(content.trim_end().to_string()),
+                span: self.span_from(start, start_line, start_col),
+            });
         }
 
         // Identifiers and keywords

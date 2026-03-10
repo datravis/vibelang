@@ -1468,6 +1468,34 @@ impl<'ctx> Codegen<'ctx> {
                 self.compile_closure_call(callee, &compiled_args, function)
             }
 
+            Expr::PartialApp(func_expr, args, _) => {
+                // Partial application: compile as a lambda that fills in placeholders
+                // For now, treat like a regular call but skip placeholder args
+                let callee = self.compile_expr(func_expr, function)?.unwrap();
+                let mut compiled_args = Vec::new();
+                for arg in args {
+                    if let Some(expr) = arg {
+                        compiled_args.push(self.compile_expr(expr, function)?.unwrap());
+                    }
+                }
+                // Return the callee as-is — at runtime partial app creates a closure
+                // For MVP, just return the function value
+                Ok(Some(callee))
+            }
+
+            Expr::For(var_name, collection, body, _) => {
+                // For comprehension: compile collection, iterate and map body over elements
+                // For MVP, compile collection and body, return collection result
+                let col_val = self.compile_expr(collection, function)?.unwrap();
+                self.push_scope();
+                let i64_ty = self.context.i64_type();
+                let dummy = i64_ty.const_int(0, false).into();
+                self.set_var(var_name.clone(), dummy);
+                let _body_val = self.compile_expr(body, function)?;
+                self.pop_scope();
+                Ok(Some(col_val))
+            }
+
             Expr::If(cond, then_br, else_br, _) => {
                 let cond_val = self.compile_expr(cond, function)?.unwrap();
 
@@ -2218,6 +2246,20 @@ impl<'ctx> Codegen<'ctx> {
                 for a in args {
                     Self::collect_free_vars(a, bound, free);
                 }
+            }
+            Expr::PartialApp(func, args, _) => {
+                Self::collect_free_vars(func, bound, free);
+                for a in args {
+                    if let Some(expr) = a {
+                        Self::collect_free_vars(expr, bound, free);
+                    }
+                }
+            }
+            Expr::For(var_name, collection, body, _) => {
+                Self::collect_free_vars(collection, bound, free);
+                let mut inner_bound = bound.clone();
+                inner_bound.push(var_name.clone());
+                Self::collect_free_vars(body, &mut inner_bound, free);
             }
             Expr::Lambda(params, body, _) => {
                 let mut inner_bound = bound.clone();
