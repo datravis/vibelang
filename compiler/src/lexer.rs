@@ -78,6 +78,10 @@ pub enum TokenKind {
     Vibe,
     When,
     With,
+    Async,
+    Await,
+    Select,
+    Where,
     WithTimeout,
 
     // Operators
@@ -103,6 +107,7 @@ pub enum TokenKind {
     GtGt,
     PlusPlus,
     PipeGt,
+    LArrow, // <-
     GtGt2, // >> as compose (contextual, same token as GtGt)
     ColonColon,
 
@@ -706,6 +711,8 @@ impl<'a> Lexer<'a> {
         let kind = match ident.as_str() {
             "and" => TokenKind::And,
             "as" => TokenKind::As,
+            "async" => TokenKind::Async,
+            "await" => TokenKind::Await,
             "do" => TokenKind::Do,
             "effect" => TokenKind::Effect,
             "else" => TokenKind::Else,
@@ -735,6 +742,7 @@ impl<'a> Lexer<'a> {
             "region" => TokenKind::Region,
             "resume" => TokenKind::Resume,
             "return" => TokenKind::Return,
+            "select" => TokenKind::Select,
             "send" => TokenKind::SendChan,
             "send_to" => TokenKind::SendTo,
             "source" => TokenKind::Source,
@@ -749,6 +757,7 @@ impl<'a> Lexer<'a> {
             "use" => TokenKind::Use,
             "vibe" => TokenKind::Vibe,
             "when" => TokenKind::When,
+            "where" => TokenKind::Where,
             "with" => TokenKind::With,
             "with_timeout" => TokenKind::WithTimeout,
             _ => {
@@ -822,6 +831,9 @@ impl<'a> Lexer<'a> {
                 } else if self.peek() == Some('<') {
                     self.advance();
                     TokenKind::LtLt
+                } else if self.peek() == Some('-') {
+                    self.advance();
+                    TokenKind::LArrow
                 } else {
                     TokenKind::Lt
                 }

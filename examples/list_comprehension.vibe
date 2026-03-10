@@ -1,0 +1,13 @@
+-- List comprehension
+fn doubles(xs: List[Int]) -> List[Int] =
+    [x * 2 | x <- xs]
+
+fn evens(xs: List[Int]) -> List[Int] =
+    [x | x <- xs, x % 2 == 0]
+
+fn main() -> Unit = do
+    let nums = [1, 2, 3, 4, 5]
+    let doubled = doubles(nums)
+    let even = evens(nums)
+    print(doubled)
+    print(even)

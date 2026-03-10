@@ -201,7 +201,14 @@ pub enum Expr {
     Resume(Box<Expr>, Span),
     Perform(String, String, Vec<Expr>, Span), // effect_name, operation, args
 
+    // List comprehension: [expr | x <- list, predicate]
+    ListComp(Box<Expr>, Vec<CompGenerator>, Vec<Expr>, Span), // body, generators, filters
+
     // Concurrency
+    Async(Box<Expr>, Span),                      // async do { body }
+    Await(Box<Expr>, Span),                      // await expr
+    Spawn(Box<Expr>, Span),                      // spawn expr
+    Select(Vec<SelectArm>, Span),                // select | msg <- ch -> body
     Par(Vec<Expr>, Span),                        // par(expr1, expr2, ...)
     Pmap(Box<Expr>, Box<Expr>, Span),            // pmap(collection, function)
     Pfilter(Box<Expr>, Box<Expr>, Span),         // pfilter(collection, predicate)
@@ -306,6 +313,21 @@ pub enum Pattern {
 #[derive(Debug, Clone)]
 pub struct WhenClause {
     pub condition: Expr,
+    pub body: Expr,
+}
+
+/// Generator in a list comprehension: x <- list
+#[derive(Debug, Clone)]
+pub struct CompGenerator {
+    pub var: String,
+    pub iter: Expr,
+}
+
+/// Arm in a select expression: | msg <- channel -> body
+#[derive(Debug, Clone)]
+pub struct SelectArm {
+    pub var: String,
+    pub channel: Expr,
     pub body: Expr,
 }
 

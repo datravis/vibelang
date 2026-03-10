@@ -1,0 +1,6 @@
+-- Spawn expression for concurrent tasks
+fn heavy_work(n: Int) -> Int = n * n
+
+fn main() -> Unit = do
+    let task = spawn(heavy_work(42))
+    print(task)

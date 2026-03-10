@@ -1,0 +1,8 @@
+-- Select expression for channel multiplexing
+fn main() -> Unit = do
+    let ch1 = create_channel(10)
+    let ch2 = create_channel(10)
+    send(ch1, 42)
+    select
+    | msg <- ch1 -> print(msg)
+    | msg <- ch2 -> print(msg)

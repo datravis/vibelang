@@ -1473,10 +1473,8 @@ impl<'ctx> Codegen<'ctx> {
                 // For now, treat like a regular call but skip placeholder args
                 let callee = self.compile_expr(func_expr, function)?.unwrap();
                 let mut compiled_args = Vec::new();
-                for arg in args {
-                    if let Some(expr) = arg {
-                        compiled_args.push(self.compile_expr(expr, function)?.unwrap());
-                    }
+                for expr in args.iter().flatten() {
+                    compiled_args.push(self.compile_expr(expr, function)?.unwrap());
                 }
                 // Return the callee as-is — at runtime partial app creates a closure
                 // For MVP, just return the function value
@@ -1707,6 +1705,20 @@ impl<'ctx> Codegen<'ctx> {
                     self.push_scope();
                     // Bind pattern variables
                     self.bind_pattern_val(&arm.pattern, scrut_val);
+
+                    // If there's a guard, check it and fall through to default if false
+                    if let Some(guard) = &arm.guard {
+                        let guard_val = self.compile_expr(guard, function)?.unwrap();
+                        let guard_int = self.ensure_i64(guard_val).into_int_value();
+                        let guard_cond = self.builder.build_int_compare(
+                            IntPredicate::NE, guard_int, i64_ty.const_int(0, false), "guard"
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        let guard_pass_bb = self.context.append_basic_block(function, "guard.pass");
+                        self.builder.build_conditional_branch(guard_cond, guard_pass_bb, default_bb)
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        self.builder.position_at_end(guard_pass_bb);
+                    }
+
                     let val = self.compile_expr(&arm.body, function)?
                         .unwrap_or_else(|| i64_ty.const_int(0, false).into());
                     self.pop_scope();
@@ -2183,6 +2195,188 @@ impl<'ctx> Codegen<'ctx> {
                     .map_err(|e| CodegenError::Llvm(e.to_string()))?;
                 Ok(result.try_as_basic_value().left())
             }
+
+            // List comprehension: compile as for-loop building a list
+            Expr::ListComp(body, generators, filters, _) => {
+                // For now, compile as nested for loops with filter
+                // Desugar: [body | x <- xs, pred] => { let result = []; for x in xs { if pred { push(result, body) } }; result }
+                let i64_type = self.context.i64_type();
+
+                // Create empty list via runtime
+                let list_create_fn = self.llvm_module.get_function("vibe_list_create").unwrap_or_else(|| {
+                    let ft = i64_type.fn_type(&[], false);
+                    self.llvm_module.add_function("vibe_list_create", ft, None)
+                });
+                let list = self.builder.build_call(list_create_fn, &[], "list")
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                    .try_as_basic_value().left()
+                    .unwrap_or_else(|| i64_type.const_int(0, false).into());
+
+                // For each generator, build a loop
+                // For simplicity, we handle the first generator and filters
+                if let Some(gen) = generators.first() {
+                    let col_val = self.compile_expr(&gen.iter, function)?.unwrap();
+                    let col_i64 = self.ensure_i64(col_val);
+
+                    // Get list length
+                    let len_fn = self.llvm_module.get_function("vibe_list_length").unwrap_or_else(|| {
+                        let ft = i64_type.fn_type(&[i64_type.into()], false);
+                        self.llvm_module.add_function("vibe_list_length", ft, None)
+                    });
+                    let len = self.builder.build_call(len_fn, &[col_i64.into()], "len")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                        .try_as_basic_value().left()
+                        .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                    let len_int = len.into_int_value();
+
+                    // Loop: i = 0; while i < len { elem = list_get(col, i); bind; if filters { push }; i++ }
+                    let i_ptr = self.builder.build_alloca(i64_type, "i")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    self.builder.build_store(i_ptr, i64_type.const_int(0, false))
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+                    let loop_bb = self.context.append_basic_block(function, "comp.loop");
+                    let body_bb = self.context.append_basic_block(function, "comp.body");
+                    let end_bb = self.context.append_basic_block(function, "comp.end");
+
+                    self.builder.build_unconditional_branch(loop_bb)
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+                    // Loop header: check i < len
+                    self.builder.position_at_end(loop_bb);
+                    let i_val = self.builder.build_load(i64_type, i_ptr, "i")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?.into_int_value();
+                    let cond = self.builder.build_int_compare(IntPredicate::SLT, i_val, len_int, "cmp")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    self.builder.build_conditional_branch(cond, body_bb, end_bb)
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+                    // Loop body
+                    self.builder.position_at_end(body_bb);
+                    self.push_scope();
+                    let get_fn = self.llvm_module.get_function("vibe_list_get").unwrap_or_else(|| {
+                        let ft = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                        self.llvm_module.add_function("vibe_list_get", ft, None)
+                    });
+                    let list_i64 = self.ensure_i64(col_val);
+                    let elem = self.builder.build_call(get_fn, &[list_i64.into(), i_val.into()], "elem")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                        .try_as_basic_value().left()
+                        .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                    self.set_var(gen.var.clone(), elem);
+
+                    // Evaluate filters
+                    let filter_bb = if !filters.is_empty() {
+                        let push_bb = self.context.append_basic_block(function, "comp.push");
+                        let skip_bb = self.context.append_basic_block(function, "comp.skip");
+                        for filter in filters {
+                            let fval = self.compile_expr(filter, function)?.unwrap();
+                            let fbool = self.ensure_i64(fval).into_int_value();
+                            let fcond = self.builder.build_int_compare(IntPredicate::NE, fbool, i64_type.const_int(0, false), "filter")
+                                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            self.builder.build_conditional_branch(fcond, push_bb, skip_bb)
+                                .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            self.builder.position_at_end(push_bb);
+                        }
+                        Some((push_bb, skip_bb))
+                    } else {
+                        None
+                    };
+
+                    // Compile body and push to result list
+                    let body_val = self.compile_expr(body, function)?.unwrap();
+                    let push_fn = self.llvm_module.get_function("vibe_list_push").unwrap_or_else(|| {
+                        let ft = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                        self.llvm_module.add_function("vibe_list_push", ft, None)
+                    });
+                    let list_i64_2 = self.ensure_i64(list);
+                    let body_i64 = self.ensure_i64(body_val);
+                    self.builder.build_call(push_fn, &[list_i64_2.into(), body_i64.into()], "push")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+                    self.pop_scope();
+
+                    // Jump to increment
+                    let _inc_bb = if let Some((_, skip_bb)) = filter_bb {
+                        // After push, jump to increment; skip also jumps to increment
+                        let inc_bb = self.context.append_basic_block(function, "comp.inc");
+                        self.builder.build_unconditional_branch(inc_bb)
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        self.builder.position_at_end(skip_bb);
+                        self.builder.build_unconditional_branch(inc_bb)
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        self.builder.position_at_end(inc_bb);
+                        inc_bb
+                    } else {
+                        body_bb
+                    };
+
+                    // i++
+                    let i_val2 = self.builder.build_load(i64_type, i_ptr, "i2")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?.into_int_value();
+                    let i_next = self.builder.build_int_add(i_val2, i64_type.const_int(1, false), "i_next")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    self.builder.build_store(i_ptr, i_next)
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                    self.builder.build_unconditional_branch(loop_bb)
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+                    self.builder.position_at_end(end_bb);
+                }
+                Ok(Some(list))
+            }
+
+            Expr::Async(body, _) => {
+                // Compile async block: for now, just evaluate the body eagerly
+                // In a full implementation this would create a task/future
+                self.compile_expr(body, function)
+            }
+
+            Expr::Await(expr, _) => {
+                // Compile await: for now, just evaluate the inner expression
+                // In a full implementation this would suspend until the future resolves
+                self.compile_expr(expr, function)
+            }
+
+            Expr::Spawn(expr, _) => {
+                // Compile spawn: call runtime spawn function
+                let val = self.compile_expr(expr, function)?.unwrap();
+                let i64_type = self.context.i64_type();
+                let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                let spawn_fn = self.llvm_module.get_function("vibe_spawn").unwrap_or_else(|| {
+                    self.llvm_module.add_function("vibe_spawn", fn_type, None)
+                });
+                let val_i64 = self.ensure_i64(val);
+                let result = self.builder.build_call(spawn_fn, &[val_i64.into()], "task")
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                Ok(result.try_as_basic_value().left())
+            }
+
+            Expr::Select(arms, _) => {
+                // Compile select: for now, evaluate first arm that has data
+                // In a full implementation this would multiplex on channels
+                let i64_type = self.context.i64_type();
+                if let Some(arm) = arms.first() {
+                    self.push_scope();
+                    let chan_val = self.compile_expr(&arm.channel, function)?.unwrap();
+                    // Receive from channel
+                    let recv_fn = self.llvm_module.get_function("vibe_chan_recv").unwrap_or_else(|| {
+                        let ft = i64_type.fn_type(&[i64_type.into()], false);
+                        self.llvm_module.add_function("vibe_chan_recv", ft, None)
+                    });
+                    let chan_i64 = self.ensure_i64(chan_val);
+                    let received = self.builder.build_call(recv_fn, &[chan_i64.into()], "recv")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                        .try_as_basic_value().left()
+                        .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                    self.set_var(arm.var.clone(), received);
+                    let result = self.compile_expr(&arm.body, function)?;
+                    self.pop_scope();
+                    Ok(result)
+                } else {
+                    Ok(Some(i64_type.const_int(0, false).into()))
+                }
+            }
         }
     }
 
@@ -2249,10 +2443,8 @@ impl<'ctx> Codegen<'ctx> {
             }
             Expr::PartialApp(func, args, _) => {
                 Self::collect_free_vars(func, bound, free);
-                for a in args {
-                    if let Some(expr) = a {
-                        Self::collect_free_vars(expr, bound, free);
-                    }
+                for expr in args.iter().flatten() {
+                    Self::collect_free_vars(expr, bound, free);
                 }
             }
             Expr::For(var_name, collection, body, _) => {
@@ -2326,8 +2518,28 @@ impl<'ctx> Codegen<'ctx> {
                 Self::collect_free_vars(init, bound, free);
                 Self::collect_free_vars(func, bound, free);
             }
-            Expr::ChanCreate(cap, _) | Expr::SpawnActor(cap, _) => {
+            Expr::ChanCreate(cap, _) | Expr::SpawnActor(cap, _)
+            | Expr::Async(cap, _) | Expr::Await(cap, _) | Expr::Spawn(cap, _) => {
                 Self::collect_free_vars(cap, bound, free);
+            }
+            Expr::ListComp(body, generators, filters, _) => {
+                let mut inner_bound = bound.clone();
+                for gen in generators {
+                    Self::collect_free_vars(&gen.iter, bound, free);
+                    inner_bound.push(gen.var.clone());
+                }
+                for filter in filters {
+                    Self::collect_free_vars(filter, &mut inner_bound, free);
+                }
+                Self::collect_free_vars(body, &mut inner_bound, free);
+            }
+            Expr::Select(arms, _) => {
+                for arm in arms {
+                    Self::collect_free_vars(&arm.channel, bound, free);
+                    let mut arm_bound = bound.clone();
+                    arm_bound.push(arm.var.clone());
+                    Self::collect_free_vars(&arm.body, &mut arm_bound, free);
+                }
             }
             Expr::ChanRecv(ch, _) => {
                 Self::collect_free_vars(ch, bound, free);

@@ -1,0 +1,10 @@
+-- Async/await expressions
+fn fetch_data(url: String) -> Int = async do
+    let result = await compute(url)
+    result
+
+fn compute(s: String) -> Int = 42
+
+fn main() -> Unit = do
+    let data = await fetch_data("test")
+    print(data)

@@ -259,6 +259,36 @@ impl Parser {
         self.expect(&TokenKind::Eq)?;
         let body = self.parse_expr()?;
 
+        // Optional where clause: desugar `expr where a = x, b = y` into
+        // `let a = x in let b = y in expr`
+        let body = if *self.peek() == TokenKind::Where {
+            self.advance();
+            let mut bindings = Vec::new();
+            loop {
+                let (bname, bspan) = self.expect_ident()?;
+                self.expect(&TokenKind::Eq)?;
+                let bval = self.parse_expr()?;
+                bindings.push((bname, bspan, bval));
+                if *self.peek() == TokenKind::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            // Wrap: let b1 = v1 in (let b2 = v2 in (... body))
+            bindings.into_iter().rev().fold(body, |inner, (bname, bspan, bval)| {
+                Expr::Let(
+                    Pattern::Ident(bname, bspan),
+                    None,
+                    Box::new(bval),
+                    Box::new(inner),
+                    span,
+                )
+            })
+        } else {
+            body
+        };
+
         Ok(FnDecl {
             public,
             name,
@@ -1156,13 +1186,48 @@ impl Parser {
                 }
             }
 
-            // List literal
+            // List literal or list comprehension
             TokenKind::LBracket => {
                 let span = self.span();
                 self.advance();
-                let mut elems = Vec::new();
-                if *self.peek() != TokenKind::RBracket {
-                    elems.push(self.parse_expr()?);
+                if *self.peek() == TokenKind::RBracket {
+                    self.advance();
+                    return Ok(Expr::List(vec![], span));
+                }
+                let first = self.parse_expr()?;
+                // Check for comprehension syntax: [expr | x <- list, ...]
+                if *self.peek() == TokenKind::Pipe {
+                    self.advance();
+                    let mut generators = Vec::new();
+                    let mut filters = Vec::new();
+                    loop {
+                        // Try to parse generator: var <- expr
+                        if let TokenKind::Ident(_) = self.peek().clone() {
+                            let save = self.pos;
+                            let (var, _) = self.expect_ident()?;
+                            if *self.peek() == TokenKind::LArrow {
+                                self.advance();
+                                let iter_expr = self.parse_expr()?;
+                                generators.push(CompGenerator { var, iter: iter_expr });
+                            } else {
+                                // Not a generator, rewind and parse as filter
+                                self.pos = save;
+                                filters.push(self.parse_expr()?);
+                            }
+                        } else {
+                            filters.push(self.parse_expr()?);
+                        }
+                        if *self.peek() == TokenKind::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.expect(&TokenKind::RBracket)?;
+                    Ok(Expr::ListComp(Box::new(first), generators, filters, span))
+                } else {
+                    // Regular list literal
+                    let mut elems = vec![first];
                     while *self.peek() == TokenKind::Comma {
                         self.advance();
                         if *self.peek() == TokenKind::RBracket {
@@ -1170,9 +1235,9 @@ impl Parser {
                         }
                         elems.push(self.parse_expr()?);
                     }
+                    self.expect(&TokenKind::RBracket)?;
+                    Ok(Expr::List(elems, span))
                 }
-                self.expect(&TokenKind::RBracket)?;
-                Ok(Expr::List(elems, span))
             }
 
             // Record literal or record update: { field: val } or { base | field: val }
@@ -1373,14 +1438,53 @@ impl Parser {
                 Ok(Expr::ChanRecv(Box::new(channel), span))
             }
 
-            // Actor: spawn(handler)
+            // spawn expr  or  spawn(handler) for actors
             TokenKind::Spawn => {
                 let span = self.span();
                 self.advance();
-                self.expect(&TokenKind::LParen)?;
-                let handler = self.parse_expr()?;
-                self.expect(&TokenKind::RParen)?;
-                Ok(Expr::SpawnActor(Box::new(handler), span))
+                if *self.peek() == TokenKind::LParen {
+                    // Could be spawn(handler) actor syntax or spawn(expr) task syntax
+                    self.advance();
+                    let expr = self.parse_expr()?;
+                    self.expect(&TokenKind::RParen)?;
+                    Ok(Expr::Spawn(Box::new(expr), span))
+                } else {
+                    let expr = self.parse_expr()?;
+                    Ok(Expr::Spawn(Box::new(expr), span))
+                }
+            }
+
+            // async do { body }
+            TokenKind::Async => {
+                let span = self.span();
+                self.advance();
+                let body = self.parse_expr()?;
+                Ok(Expr::Async(Box::new(body), span))
+            }
+
+            // await expr
+            TokenKind::Await => {
+                let span = self.span();
+                self.advance();
+                let expr = self.parse_expr()?;
+                Ok(Expr::Await(Box::new(expr), span))
+            }
+
+            // select | msg <- ch -> body | ...
+            TokenKind::Select => {
+                let span = self.span();
+                self.advance();
+                let mut arms = Vec::new();
+                while *self.peek() == TokenKind::Pipe {
+                    self.advance();
+                    let (var, _) = self.expect_ident()?;
+                    self.expect(&TokenKind::LArrow)?;
+                    let channel = self.parse_expr()?;
+                    self.expect(&TokenKind::Arrow)?;
+                    let body = self.parse_expr()?;
+                    arms.push(SelectArm { var, channel, body });
+                }
+                Ok(Expr::Select(arms, span))
             }
 
             // Actor: send_to(actor, message)
@@ -1473,7 +1577,7 @@ impl Parser {
         while *self.peek() == TokenKind::Pipe {
             self.advance();
             let pattern = self.parse_pattern()?;
-            let guard = if *self.peek() == TokenKind::When {
+            let guard = if *self.peek() == TokenKind::When || *self.peek() == TokenKind::If {
                 self.advance();
                 Some(Box::new(self.parse_expr()?))
             } else {

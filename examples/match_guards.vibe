@@ -1,0 +1,11 @@
+-- Match guards with if keyword
+fn classify(n: Int) -> String =
+    match n
+    | x if x > 0 -> "positive"
+    | x if x < 0 -> "negative"
+    | _ -> "zero"
+
+fn main() -> Unit = do
+    print(classify(42))
+    print(classify(-5))
+    print(classify(0))

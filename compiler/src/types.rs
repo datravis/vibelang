@@ -513,10 +513,8 @@ impl TypeChecker {
 
             Expr::PartialApp(func, args, _) => {
                 let ft = self.check_expr(func)?;
-                for arg in args {
-                    if let Some(expr) = arg {
-                        self.check_expr(expr)?;
-                    }
+                for expr in args.iter().flatten() {
+                    self.check_expr(expr)?;
                 }
                 // Partial application returns a function over the remaining (placeholder) params
                 match ft {
@@ -732,6 +730,55 @@ impl TypeChecker {
 
             Expr::VibePipeline(source, _stages, _) => {
                 self.check_expr(source)
+            }
+
+            Expr::ListComp(body, generators, filters, _) => {
+                self.push_scope();
+                for gen in generators {
+                    let col_type = self.check_expr(&gen.iter)?;
+                    let elem_type = match &col_type {
+                        Type::List(inner) => *inner.clone(),
+                        _ => Type::Unknown,
+                    };
+                    self.define(gen.var.clone(), elem_type);
+                }
+                for filter in filters {
+                    self.check_expr(filter)?;
+                }
+                let body_type = self.check_expr(body)?;
+                self.pop_scope();
+                Ok(Type::List(Box::new(body_type)))
+            }
+
+            Expr::Async(body, _) => {
+                let inner = self.check_expr(body)?;
+                Ok(Type::Named("Async".into(), vec![inner]))
+            }
+
+            Expr::Await(expr, _) => {
+                let t = self.check_expr(expr)?;
+                match t {
+                    Type::Named(ref name, ref args) if name == "Async" && !args.is_empty() => {
+                        Ok(args[0].clone())
+                    }
+                    _ => Ok(Type::Unknown),
+                }
+            }
+
+            Expr::Spawn(expr, _) => {
+                let inner = self.check_expr(expr)?;
+                Ok(Type::Named("Async".into(), vec![inner]))
+            }
+
+            Expr::Select(arms, _) => {
+                for arm in arms {
+                    self.check_expr(&arm.channel)?;
+                    self.push_scope();
+                    self.define(arm.var.clone(), Type::Unknown);
+                    self.check_expr(&arm.body)?;
+                    self.pop_scope();
+                }
+                Ok(Type::Unknown)
             }
         }
     }

@@ -192,10 +192,8 @@ impl EscapeAnalyzer {
 
             Expr::PartialApp(func, args, _) => {
                 self.analyze_expr(func, false);
-                for a in args {
-                    if let Some(expr) = a {
-                        self.analyze_expr(expr, false);
-                    }
+                for expr in args.iter().flatten() {
+                    self.analyze_expr(expr, false);
                 }
             }
 
@@ -358,6 +356,24 @@ impl EscapeAnalyzer {
                         crate::ast::PipelineStage::Last |
                         crate::ast::PipelineStage::Distinct => {}
                     }
+                }
+            }
+            Expr::ListComp(body, generators, filters, _) => {
+                for gen in generators {
+                    self.analyze_expr(&gen.iter, false);
+                }
+                for filter in filters {
+                    self.analyze_expr(filter, false);
+                }
+                self.analyze_expr(body, false);
+            }
+            Expr::Async(body, _) | Expr::Await(body, _) | Expr::Spawn(body, _) => {
+                self.analyze_expr(body, false);
+            }
+            Expr::Select(arms, _) => {
+                for arm in arms {
+                    self.analyze_expr(&arm.channel, false);
+                    self.analyze_expr(&arm.body, false);
                 }
             }
         }
