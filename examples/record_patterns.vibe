@@ -1,0 +1,9 @@
+-- Record destructuring in patterns
+fn describe_point(p: { x: Int, y: Int }) -> Int = do
+    let { x, y } = p
+    x + y
+
+fn main() -> Unit = do
+    let point = { x: 10, y: 20 }
+    let sum = describe_point(point)
+    print(sum)

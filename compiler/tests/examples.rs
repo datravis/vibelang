@@ -85,6 +85,7 @@ lex_test!(lex_type_aliases, "type_aliases.vibe");
 lex_test!(lex_prelude_functions, "prelude_functions.vibe");
 lex_test!(lex_test_decl, "test_decl.vibe");
 lex_test!(lex_lambda_shorthand, "lambda_shorthand.vibe");
+lex_test!(lex_record_patterns, "record_patterns.vibe");
 
 // ── Parser tests ─────────────────────────────────────────────────────
 
@@ -147,6 +148,7 @@ parse_test!(parse_type_aliases, "type_aliases.vibe");
 parse_test!(parse_prelude_functions, "prelude_functions.vibe");
 parse_test!(parse_test_decl, "test_decl.vibe");
 parse_test!(parse_lambda_shorthand, "lambda_shorthand.vibe");
+parse_test!(parse_record_patterns, "record_patterns.vibe");
 
 // ── Type-checker tests ───────────────────────────────────────────────
 
@@ -204,3 +206,4 @@ typecheck_test!(typecheck_type_aliases, "type_aliases.vibe");
 typecheck_test!(typecheck_prelude_functions, "prelude_functions.vibe");
 typecheck_test!(typecheck_test_decl, "test_decl.vibe");
 typecheck_test!(typecheck_lambda_shorthand, "lambda_shorthand.vibe");
+typecheck_test!(typecheck_record_patterns, "record_patterns.vibe");

@@ -1556,6 +1556,30 @@ impl Parser {
                 self.expect(&TokenKind::RParen)?;
                 Ok(Pattern::Tuple(pats, span))
             }
+            TokenKind::LBrace => {
+                // Record pattern: { x, y } or { x: pat, y: pat }
+                let span = self.span();
+                self.advance();
+                let mut fields = Vec::new();
+                while *self.peek() != TokenKind::RBrace {
+                    let (fname, _) = self.expect_ident()?;
+                    let pat = if *self.peek() == TokenKind::Colon {
+                        self.advance();
+                        self.parse_pattern()?
+                    } else {
+                        // Shorthand: { x } means { x: x }
+                        Pattern::Ident(fname.clone(), span)
+                    };
+                    fields.push((fname, pat));
+                    if *self.peek() == TokenKind::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RBrace)?;
+                Ok(Pattern::Record(fields, span))
+            }
             _ => {
                 let span = self.span();
                 Err(ParseError::Unexpected(
