@@ -208,8 +208,16 @@ impl Parser {
             false
         };
 
+        // Check for `unsafe fn` declarations
+        let is_unsafe = if *self.peek() == TokenKind::Unsafe {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
         match self.peek() {
-            TokenKind::Fn => Ok(Decl::Function(self.parse_fn_decl(public)?)),
+            TokenKind::Fn => Ok(Decl::Function(self.parse_fn_decl(public, is_unsafe)?)),
             TokenKind::Type => Ok(Decl::TypeDef(self.parse_type_def(public)?)),
             TokenKind::Newtype => Ok(Decl::NewtypeDef(self.parse_newtype_def(public)?)),
             TokenKind::Nominal => Ok(Decl::NominalDef(self.parse_nominal_def(public)?)),
@@ -224,13 +232,13 @@ impl Parser {
                     format!("{}", self.peek()),
                     span.line,
                     span.col,
-                    "declaration (fn, type, newtype, nominal, trait, impl, effect, test)".into(),
+                    "declaration (fn, type, newtype, nominal, trait, impl, effect, unsafe fn, test)".into(),
                 ))
             }
         }
     }
 
-    fn parse_fn_decl(&mut self, public: bool) -> Result<FnDecl, ParseError> {
+    fn parse_fn_decl(&mut self, public: bool, is_unsafe: bool) -> Result<FnDecl, ParseError> {
         let span = self.expect(&TokenKind::Fn)?;
         let (name, _) = self.expect_ident()?;
         // Optional type parameters: fn name[A: Ord, B](...)
@@ -291,6 +299,7 @@ impl Parser {
 
         Ok(FnDecl {
             public,
+            is_unsafe,
             name,
             params,
             return_type,
@@ -712,6 +721,7 @@ impl Parser {
 
         Ok(FnDecl {
             public: false,
+            is_unsafe: false,
             name,
             params,
             return_type,
@@ -769,7 +779,7 @@ impl Parser {
         self.expect(&TokenKind::LBrace)?;
         let mut methods = Vec::new();
         while *self.peek() != TokenKind::RBrace {
-            methods.push(self.parse_fn_decl(false)?);
+            methods.push(self.parse_fn_decl(false, false)?);
         }
         self.expect(&TokenKind::RBrace)?;
 
@@ -831,6 +841,7 @@ impl Parser {
         // Effect operations have no body — use unit placeholder
         Ok(FnDecl {
             public: false,
+            is_unsafe: false,
             name,
             params,
             return_type,
@@ -1309,6 +1320,16 @@ impl Parser {
 
             // Do block
             TokenKind::Do => self.parse_do_block(),
+
+            // Unsafe block: unsafe { expr }
+            TokenKind::Unsafe => {
+                let span = self.span();
+                self.advance();
+                self.expect(&TokenKind::LBrace)?;
+                let body = self.parse_expr()?;
+                self.expect(&TokenKind::RBrace)?;
+                Ok(Expr::UnsafeBlock(Box::new(body), span))
+            }
 
             // For comprehension: for x in collection do body
             TokenKind::For => {

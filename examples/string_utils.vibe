@@ -1,0 +1,19 @@
+-- String utility functions: trim_start, trim_end, from_chars
+
+fn main() -> Unit = do
+    let s = "  hello world  "
+    let trimmed_start = trim_start(s)
+    print(trimmed_start)
+
+    let trimmed_end = trim_end(s)
+    print(trimmed_end)
+
+    let both = trim(s)
+    print(both)
+
+    let original = "abc"
+    let char_list = chars(original)
+    let rebuilt = from_chars(char_list)
+    print(rebuilt)
+
+    print("done")

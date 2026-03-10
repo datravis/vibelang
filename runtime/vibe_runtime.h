@@ -85,6 +85,23 @@ int64_t vibe_channel_recv(vibe_channel_t *ch);
 void vibe_channel_close(vibe_channel_t *ch);
 void vibe_channel_destroy(vibe_channel_t *ch);
 
+/* --- Pipeline Utility Functions --- */
+
+typedef int64_t (*vibe_key_fn)(int64_t);
+
+vibe_cons_t *vibe_list_distinct_by(vibe_cons_t *list, vibe_key_fn key_fn, void *region);
+vibe_cons_t *vibe_list_window(vibe_cons_t *list, int64_t size, int64_t stride, void *region);
+vibe_cons_t *vibe_list_zip(vibe_cons_t *a, vibe_cons_t *b, void *region);
+int64_t vibe_list_min_by(vibe_cons_t *list, vibe_key_fn key_fn);
+int64_t vibe_list_max_by(vibe_cons_t *list, vibe_key_fn key_fn);
+vibe_cons_t *vibe_list_merge(vibe_cons_t *a, vibe_cons_t *b, void *region);
+
+/* --- String Utility Functions --- */
+
+char *vibe_trim_start(const char *s);
+char *vibe_trim_end(const char *s);
+char *vibe_from_chars(vibe_cons_t *chars);
+
 #ifdef __cplusplus
 }
 #endif

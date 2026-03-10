@@ -53,6 +53,7 @@ pub struct VibeDecl {
 #[derive(Debug, Clone)]
 pub struct FnDecl {
     pub public: bool,
+    pub is_unsafe: bool,
     pub name: String,
     pub params: Vec<Param>,
     pub return_type: Option<TypeExpr>,
@@ -223,6 +224,9 @@ pub enum Expr {
     SpawnActor(Box<Expr>, Span),                 // spawn(handler)
     SendTo(Box<Expr>, Box<Expr>, Span),          // send_to(actor, message)
     WithTimeout(Box<Expr>, Box<Expr>, Span),     // with_timeout(duration, expr)
+
+    // Unsafe
+    UnsafeBlock(Box<Expr>, Span),                // unsafe { expr }
 }
 
 #[derive(Debug, Clone)]
@@ -256,6 +260,18 @@ pub enum PipelineStage {
     All(Expr),
     Reduce(Expr),
     Inspect(Expr),
+    DistinctBy(Expr),        // distinct_by(key_fn)
+    Window(Expr, Expr),      // window(size, stride)
+    Zip(Expr),               // zip(other_source)
+    MinBy(Expr),             // min_by(key_fn)
+    MaxBy(Expr),             // max_by(key_fn)
+    CollectVec,              // collect_vec
+    CollectMap(Expr),        // collect_map(key_fn)
+    Merge(Expr),             // merge(other_vibe)
+    Broadcast(Expr),         // broadcast(n)
+    Batch(Expr, Expr),       // batch(timeout, max_size)
+    Parallel(Expr, Expr),    // parallel(workers, chunk_size)
+    Sequential,              // sequential
 }
 
 #[derive(Debug, Clone)]

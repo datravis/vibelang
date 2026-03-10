@@ -129,6 +129,18 @@ impl TypeChecker {
         env.insert("abs".into(), Type::Fn(vec![Type::Int], Box::new(Type::Int)));
         env.insert("min".into(), Type::Fn(vec![Type::Int, Type::Int], Box::new(Type::Int)));
         env.insert("max".into(), Type::Fn(vec![Type::Int, Type::Int], Box::new(Type::Int)));
+        env.insert("clamp".into(), Type::Fn(vec![Type::Int, Type::Int, Type::Int], Box::new(Type::Int)));
+
+        // Math functions (Float -> Float)
+        for name in &["sqrt", "sin", "cos", "tan", "log", "log2", "log10", "floor", "ceil", "round"] {
+            env.insert(name.to_string(), Type::Fn(vec![Type::Float], Box::new(Type::Float)));
+        }
+        env.insert("pow".into(), Type::Fn(vec![Type::Float, Type::Float], Box::new(Type::Float)));
+
+        // Math constants
+        env.insert("pi".into(), Type::Float);
+        env.insert("e".into(), Type::Float);
+        env.insert("tau".into(), Type::Float);
         env.insert("to_string".into(), Type::Fn(vec![Type::Unknown], Box::new(Type::String)));
         env.insert("to_upper".into(), Type::Fn(vec![Type::String], Box::new(Type::String)));
         env.insert("trim".into(), Type::Fn(vec![Type::String], Box::new(Type::String)));
@@ -140,6 +152,9 @@ impl TypeChecker {
         env.insert("replace".into(), Type::Fn(vec![Type::String, Type::String, Type::String], Box::new(Type::String)));
         env.insert("substring".into(), Type::Fn(vec![Type::String, Type::Int, Type::Int], Box::new(Type::String)));
         env.insert("chars".into(), Type::Fn(vec![Type::String], Box::new(Type::List(Box::new(Type::Char)))));
+        env.insert("trim_start".into(), Type::Fn(vec![Type::String], Box::new(Type::String)));
+        env.insert("trim_end".into(), Type::Fn(vec![Type::String], Box::new(Type::String)));
+        env.insert("from_chars".into(), Type::Fn(vec![Type::List(Box::new(Type::Char))], Box::new(Type::String)));
         env.insert("parse_int".into(), Type::Fn(vec![Type::String], Box::new(Type::Unknown)));
         env.insert("parse_float".into(), Type::Fn(vec![Type::String], Box::new(Type::Unknown)));
         env.insert(
@@ -222,6 +237,60 @@ impl TypeChecker {
             "inspect".into(),
             Type::Fn(vec![fn_t.clone()], Box::new(list_t)),
         );
+
+        // Vec operations
+        let vec_t = Type::Named("Vec".into(), vec![Type::Unknown]);
+        env.insert("vec_empty".into(), Type::Fn(vec![], Box::new(vec_t.clone())));
+        env.insert("vec_singleton".into(), Type::Fn(vec![Type::Unknown], Box::new(vec_t.clone())));
+        env.insert("vec_push".into(), Type::Fn(vec![vec_t.clone(), Type::Unknown], Box::new(vec_t.clone())));
+        env.insert("vec_get".into(), Type::Fn(vec![vec_t.clone(), Type::Int], Box::new(Type::Unknown)));
+        env.insert("vec_set".into(), Type::Fn(vec![vec_t.clone(), Type::Int, Type::Unknown], Box::new(vec_t.clone())));
+        env.insert("vec_length".into(), Type::Fn(vec![vec_t.clone()], Box::new(Type::Int)));
+        env.insert("vec_concat".into(), Type::Fn(vec![vec_t.clone(), vec_t.clone()], Box::new(vec_t.clone())));
+        env.insert("vec_slice".into(), Type::Fn(vec![vec_t.clone(), Type::Int, Type::Int], Box::new(vec_t.clone())));
+        env.insert("vec_map".into(), Type::Fn(vec![vec_t.clone(), fn_t.clone()], Box::new(vec_t.clone())));
+        env.insert("vec_filter".into(), Type::Fn(vec![vec_t.clone(), fn_t.clone()], Box::new(vec_t.clone())));
+        env.insert("vec_fold".into(), Type::Fn(vec![vec_t.clone(), Type::Unknown, fn_t.clone()], Box::new(Type::Unknown)));
+        env.insert("vec_to_list".into(), Type::Fn(vec![vec_t.clone()], Box::new(Type::List(Box::new(Type::Unknown)))));
+
+        // Map operations
+        let map_t = Type::Named("Map".into(), vec![Type::Unknown, Type::Unknown]);
+        env.insert("map_empty".into(), Type::Fn(vec![], Box::new(map_t.clone())));
+        env.insert("map_singleton".into(), Type::Fn(vec![Type::Unknown, Type::Unknown], Box::new(map_t.clone())));
+        env.insert("map_insert".into(), Type::Fn(vec![map_t.clone(), Type::Unknown, Type::Unknown], Box::new(map_t.clone())));
+        env.insert("map_get".into(), Type::Fn(vec![map_t.clone(), Type::Unknown], Box::new(Type::Unknown)));
+        env.insert("map_remove".into(), Type::Fn(vec![map_t.clone(), Type::Unknown], Box::new(map_t.clone())));
+        env.insert("map_contains_key".into(), Type::Fn(vec![map_t.clone(), Type::Unknown], Box::new(Type::Bool)));
+        env.insert("map_size".into(), Type::Fn(vec![map_t.clone()], Box::new(Type::Int)));
+        env.insert("map_keys".into(), Type::Fn(vec![map_t.clone()], Box::new(Type::List(Box::new(Type::Unknown)))));
+        env.insert("map_values".into(), Type::Fn(vec![map_t.clone()], Box::new(Type::List(Box::new(Type::Unknown)))));
+        env.insert("map_entries".into(), Type::Fn(vec![map_t.clone()], Box::new(Type::List(Box::new(Type::Tuple(vec![Type::Unknown, Type::Unknown]))))));
+        env.insert("map_merge".into(), Type::Fn(vec![map_t.clone(), map_t.clone()], Box::new(map_t.clone())));
+
+        // Set operations
+        let set_t = Type::Named("Set".into(), vec![Type::Unknown]);
+        env.insert("set_empty".into(), Type::Fn(vec![], Box::new(set_t.clone())));
+        env.insert("set_singleton".into(), Type::Fn(vec![Type::Unknown], Box::new(set_t.clone())));
+        env.insert("set_insert".into(), Type::Fn(vec![set_t.clone(), Type::Unknown], Box::new(set_t.clone())));
+        env.insert("set_remove".into(), Type::Fn(vec![set_t.clone(), Type::Unknown], Box::new(set_t.clone())));
+        env.insert("set_contains".into(), Type::Fn(vec![set_t.clone(), Type::Unknown], Box::new(Type::Bool)));
+        env.insert("set_size".into(), Type::Fn(vec![set_t.clone()], Box::new(Type::Int)));
+        env.insert("set_union".into(), Type::Fn(vec![set_t.clone(), set_t.clone()], Box::new(set_t.clone())));
+        env.insert("set_intersection".into(), Type::Fn(vec![set_t.clone(), set_t.clone()], Box::new(set_t.clone())));
+        env.insert("set_difference".into(), Type::Fn(vec![set_t.clone(), set_t.clone()], Box::new(set_t.clone())));
+        env.insert("set_to_list".into(), Type::Fn(vec![set_t], Box::new(Type::List(Box::new(Type::Unknown)))));
+
+        // Pipeline operations
+        env.insert("distinct_by".into(), Type::Fn(vec![fn_t.clone()], Box::new(Type::Unknown)));
+        env.insert("window".into(), Type::Fn(vec![Type::Int, Type::Int], Box::new(Type::Unknown)));
+        env.insert("zip".into(), Type::Fn(vec![Type::Unknown], Box::new(Type::Unknown)));
+        env.insert("min_by".into(), Type::Fn(vec![fn_t.clone()], Box::new(Type::Unknown)));
+        env.insert("max_by".into(), Type::Fn(vec![fn_t.clone()], Box::new(Type::Unknown)));
+        env.insert("collect_vec".into(), Type::Fn(vec![], Box::new(vec_t)));
+        env.insert("collect_map".into(), Type::Fn(vec![fn_t.clone()], Box::new(map_t)));
+        env.insert("broadcast".into(), Type::Fn(vec![Type::Int], Box::new(Type::Unknown)));
+        env.insert("merge".into(), Type::Fn(vec![Type::Unknown], Box::new(Type::Unknown)));
+        env.insert("batch".into(), Type::Fn(vec![Type::Int, Type::Int], Box::new(Type::Unknown)));
 
         // Channel operations
         env.insert(
@@ -732,6 +801,10 @@ impl TypeChecker {
                 self.check_expr(source)
             }
 
+            Expr::UnsafeBlock(body, _) => {
+                self.check_expr(body)
+            }
+
             Expr::ListComp(body, generators, filters, _) => {
                 self.push_scope();
                 for gen in generators {
@@ -1054,6 +1127,7 @@ pub fn check(module: &Module) -> Result<(), TypeError> {
                 // Type check vibe body like a function
                 let fn_decl = FnDecl {
                     public: false,
+                    is_unsafe: false,
                     name: v.name.clone(),
                     params: v.params.clone(),
                     return_type: v.return_type.clone(),

@@ -750,3 +750,227 @@ int64_t vibe_race_execute(vibe_thunk_fn *thunks, int n) {
     free(threads);
     return result;
 }
+
+/* ============================================================
+ * Pipeline Utility Functions
+ * ============================================================ */
+
+typedef int64_t (*vibe_key_fn)(int64_t);
+
+/* distinct_by(list, key_fn, region): keep first element per key_fn result.
+ * Uses a simple O(n^2) scan (good enough for moderate lists). */
+vibe_cons_t *vibe_list_distinct_by(vibe_cons_t *list, vibe_key_fn key_fn, void *region) {
+    if (!list) return NULL;
+    (void)region;
+
+    /* Collect all elements and keys */
+    int64_t n = vibe_list_count(list);
+    int64_t *values = (int64_t *)malloc(n * sizeof(int64_t));
+    int64_t *keys = (int64_t *)malloc(n * sizeof(int64_t));
+    vibe_cons_t *cur = list;
+    for (int64_t i = 0; i < n; i++) {
+        values[i] = cur->value;
+        keys[i] = key_fn(cur->value);
+        cur = cur->next;
+    }
+
+    /* Mark duplicates */
+    int64_t *keep = (int64_t *)calloc(n, sizeof(int64_t));
+    for (int64_t i = 0; i < n; i++) {
+        int dup = 0;
+        for (int64_t j = 0; j < i; j++) {
+            if (keys[j] == keys[i]) { dup = 1; break; }
+        }
+        keep[i] = !dup;
+    }
+
+    /* Build result list */
+    vibe_cons_t *result = NULL;
+    for (int64_t i = n - 1; i >= 0; i--) {
+        if (keep[i]) {
+            vibe_cons_t *cell = (vibe_cons_t *)malloc(sizeof(vibe_cons_t));
+            cell->value = values[i];
+            cell->next = result;
+            result = cell;
+        }
+    }
+
+    free(values);
+    free(keys);
+    free(keep);
+    return result;
+}
+
+/* window(list, size, stride, region): sliding window over list */
+vibe_cons_t *vibe_list_window(vibe_cons_t *list, int64_t size, int64_t stride, void *region) {
+    if (!list || size <= 0 || stride <= 0) return NULL;
+    (void)region;
+
+    int64_t n = vibe_list_count(list);
+    int64_t *arr = (int64_t *)malloc(n * sizeof(int64_t));
+    vibe_cons_t *cur = list;
+    for (int64_t i = 0; i < n; i++) {
+        arr[i] = cur->value;
+        cur = cur->next;
+    }
+
+    /* Build windows as sub-lists */
+    vibe_cons_t *result = NULL;
+    for (int64_t start = n - 1; start >= 0; start -= stride) {
+        int64_t wstart = start - size + 1;
+        if (wstart < 0) wstart = 0;
+        if (start - wstart + 1 < size && start != n - 1) continue;
+
+        /* Build sub-list for this window */
+        vibe_cons_t *window = NULL;
+        for (int64_t j = start; j >= wstart; j--) {
+            vibe_cons_t *cell = (vibe_cons_t *)malloc(sizeof(vibe_cons_t));
+            cell->value = arr[j];
+            cell->next = window;
+            window = cell;
+        }
+
+        /* Wrap the window list as a value in the outer list */
+        vibe_cons_t *outer = (vibe_cons_t *)malloc(sizeof(vibe_cons_t));
+        outer->value = (int64_t)(intptr_t)window;
+        outer->next = result;
+        result = outer;
+    }
+
+    free(arr);
+    return result;
+}
+
+/* zip(list1, list2, region): pair elements from two lists */
+vibe_cons_t *vibe_list_zip(vibe_cons_t *a, vibe_cons_t *b, void *region) {
+    (void)region;
+    if (!a || !b) return NULL;
+
+    vibe_cons_t *result = NULL;
+    vibe_cons_t **tail = &result;
+
+    while (a && b) {
+        /* Create a pair as a 2-element sub-list: (a.value, b.value) */
+        vibe_cons_t *pair_b = (vibe_cons_t *)malloc(sizeof(vibe_cons_t));
+        pair_b->value = b->value;
+        pair_b->next = NULL;
+
+        vibe_cons_t *pair_a = (vibe_cons_t *)malloc(sizeof(vibe_cons_t));
+        pair_a->value = a->value;
+        pair_a->next = pair_b;
+
+        vibe_cons_t *cell = (vibe_cons_t *)malloc(sizeof(vibe_cons_t));
+        cell->value = (int64_t)(intptr_t)pair_a;
+        cell->next = NULL;
+        *tail = cell;
+        tail = &cell->next;
+
+        a = a->next;
+        b = b->next;
+    }
+
+    return result;
+}
+
+/* min_by(list, key_fn): find element with minimum key */
+int64_t vibe_list_min_by(vibe_cons_t *list, vibe_key_fn key_fn) {
+    if (!list) return 0;
+    int64_t best_val = list->value;
+    int64_t best_key = key_fn(list->value);
+    list = list->next;
+    while (list) {
+        int64_t k = key_fn(list->value);
+        if (k < best_key) {
+            best_key = k;
+            best_val = list->value;
+        }
+        list = list->next;
+    }
+    return best_val;
+}
+
+/* max_by(list, key_fn): find element with maximum key */
+int64_t vibe_list_max_by(vibe_cons_t *list, vibe_key_fn key_fn) {
+    if (!list) return 0;
+    int64_t best_val = list->value;
+    int64_t best_key = key_fn(list->value);
+    list = list->next;
+    while (list) {
+        int64_t k = key_fn(list->value);
+        if (k > best_key) {
+            best_key = k;
+            best_val = list->value;
+        }
+        list = list->next;
+    }
+    return best_val;
+}
+
+/* merge(list1, list2, region): interleave elements from two lists */
+vibe_cons_t *vibe_list_merge(vibe_cons_t *a, vibe_cons_t *b, void *region) {
+    (void)region;
+    vibe_cons_t *result = NULL;
+    vibe_cons_t **tail = &result;
+
+    while (a || b) {
+        if (a) {
+            vibe_cons_t *cell = (vibe_cons_t *)malloc(sizeof(vibe_cons_t));
+            cell->value = a->value;
+            cell->next = NULL;
+            *tail = cell;
+            tail = &cell->next;
+            a = a->next;
+        }
+        if (b) {
+            vibe_cons_t *cell = (vibe_cons_t *)malloc(sizeof(vibe_cons_t));
+            cell->value = b->value;
+            cell->next = NULL;
+            *tail = cell;
+            tail = &cell->next;
+            b = b->next;
+        }
+    }
+
+    return result;
+}
+
+/* ============================================================
+ * String Utility Functions
+ * ============================================================ */
+
+#include <ctype.h>
+
+/* trim_start: remove leading whitespace */
+char *vibe_trim_start(const char *s) {
+    if (!s) return NULL;
+    while (*s && isspace((unsigned char)*s)) s++;
+    size_t len = strlen(s);
+    char *result = (char *)malloc(len + 1);
+    memcpy(result, s, len + 1);
+    return result;
+}
+
+/* trim_end: remove trailing whitespace */
+char *vibe_trim_end(const char *s) {
+    if (!s) return NULL;
+    size_t len = strlen(s);
+    while (len > 0 && isspace((unsigned char)s[len - 1])) len--;
+    char *result = (char *)malloc(len + 1);
+    memcpy(result, s, len);
+    result[len] = '\0';
+    return result;
+}
+
+/* from_chars: construct string from a linked list of characters (vibe_cons_t of char values) */
+char *vibe_from_chars(vibe_cons_t *chars) {
+    /* Count characters */
+    int64_t n = vibe_list_count(chars);
+    char *result = (char *)malloc(n + 1);
+    vibe_cons_t *cur = chars;
+    for (int64_t i = 0; i < n; i++) {
+        result[i] = (char)cur->value;
+        cur = cur->next;
+    }
+    result[n] = '\0';
+    return result;
+}

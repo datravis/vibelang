@@ -310,7 +310,8 @@ impl EscapeAnalyzer {
                 self.analyze_expr(func, false);
             }
 
-            Expr::ChanCreate(cap, _) | Expr::SpawnActor(cap, _) => {
+            Expr::ChanCreate(cap, _) | Expr::SpawnActor(cap, _)
+            | Expr::UnsafeBlock(cap, _) => {
                 self.analyze_expr(cap, false);
             }
 
@@ -342,11 +343,21 @@ impl EscapeAnalyzer {
                         crate::ast::PipelineStage::Any(f) |
                         crate::ast::PipelineStage::All(f) |
                         crate::ast::PipelineStage::Reduce(f) |
-                        crate::ast::PipelineStage::Inspect(f) => {
+                        crate::ast::PipelineStage::Inspect(f) |
+                        crate::ast::PipelineStage::DistinctBy(f) |
+                        crate::ast::PipelineStage::Zip(f) |
+                        crate::ast::PipelineStage::MinBy(f) |
+                        crate::ast::PipelineStage::MaxBy(f) |
+                        crate::ast::PipelineStage::CollectMap(f) |
+                        crate::ast::PipelineStage::Merge(f) |
+                        crate::ast::PipelineStage::Broadcast(f) => {
                             self.analyze_expr(f, false);
                         }
                         crate::ast::PipelineStage::Fold(init, f) |
-                        crate::ast::PipelineStage::Scan(init, f) => {
+                        crate::ast::PipelineStage::Scan(init, f) |
+                        crate::ast::PipelineStage::Window(init, f) |
+                        crate::ast::PipelineStage::Batch(init, f) |
+                        crate::ast::PipelineStage::Parallel(init, f) => {
                             self.analyze_expr(init, false);
                             self.analyze_expr(f, false);
                         }
@@ -354,7 +365,9 @@ impl EscapeAnalyzer {
                         crate::ast::PipelineStage::Count |
                         crate::ast::PipelineStage::First |
                         crate::ast::PipelineStage::Last |
-                        crate::ast::PipelineStage::Distinct => {}
+                        crate::ast::PipelineStage::Distinct |
+                        crate::ast::PipelineStage::CollectVec |
+                        crate::ast::PipelineStage::Sequential => {}
                     }
                 }
             }

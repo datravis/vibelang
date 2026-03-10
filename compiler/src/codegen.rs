@@ -342,6 +342,12 @@ impl<'ctx> Codegen<'ctx> {
         self.declare_concurrency_runtime();
         self.declare_pipeline_runtime();
 
+        // Math constants in global scope
+        let f64_ty = self.context.f64_type();
+        self.set_var("pi".into(), f64_ty.const_float(std::f64::consts::PI).into());
+        self.set_var("e".into(), f64_ty.const_float(std::f64::consts::E).into());
+        self.set_var("tau".into(), f64_ty.const_float(std::f64::consts::TAU).into());
+
         // Pass 0: register type definitions (records, variants) and traits
         for decl in &module.declarations {
             match decl {
@@ -365,6 +371,7 @@ impl<'ctx> Codegen<'ctx> {
                 Decl::VibeDecl(v) => {
                     let fn_decl = FnDecl {
                         public: false,
+                        is_unsafe: false,
                         name: v.name.clone(),
                         params: v.params.clone(),
                         return_type: v.return_type.clone(),
@@ -386,6 +393,7 @@ impl<'ctx> Codegen<'ctx> {
                 Decl::VibeDecl(v) => {
                     let fn_decl = FnDecl {
                         public: false,
+                        is_unsafe: false,
                         name: v.name.clone(),
                         params: v.params.clone(),
                         return_type: v.return_type.clone(),
@@ -480,6 +488,7 @@ impl<'ctx> Codegen<'ctx> {
             // Create FnDecl with mangled name for declaration
             let mangled_decl = FnDecl {
                 public: method.public,
+                is_unsafe: method.is_unsafe,
                 name: mangled.clone(),
                 params: method.params.clone(),
                 return_type: method.return_type.clone(),
@@ -521,6 +530,7 @@ impl<'ctx> Codegen<'ctx> {
 
             let mangled_decl = FnDecl {
                 public: method.public,
+                is_unsafe: method.is_unsafe,
                 name: mangled,
                 params: method.params.clone(),
                 return_type: method.return_type.clone(),
@@ -652,6 +662,30 @@ impl<'ctx> Codegen<'ctx> {
         );
         let strlen = self.llvm_module.add_function("strlen", strlen_type, None);
         self.functions.insert("strlen".into(), strlen);
+
+        // Math functions (libm)
+        let f64_ty = self.context.f64_type();
+
+        for name in &["sqrt", "sin", "cos", "tan", "log", "log2", "log10", "floor", "ceil", "round"] {
+            let ft = f64_ty.fn_type(&[f64_ty.into()], false);
+            let f = self.llvm_module.add_function(name, ft, None);
+            self.functions.insert(name.to_string(), f);
+            self.function_arities.insert(name.to_string(), 1);
+        }
+        let pow_ft = f64_ty.fn_type(&[f64_ty.into(), f64_ty.into()], false);
+        let pow_f = self.llvm_module.add_function("pow", pow_ft, None);
+        self.functions.insert("pow".into(), pow_f);
+        self.function_arities.insert("pow".into(), 2);
+
+        // Declare string utility functions that can be called by name
+        let str_str_ft = ptr_ty.fn_type(&[ptr_ty.into()], false);
+        let trim_start_fn = self.llvm_module.add_function("vibe_trim_start", str_str_ft, None);
+        self.functions.insert("vibe_trim_start".into(), trim_start_fn);
+        let trim_end_fn = self.llvm_module.add_function("vibe_trim_end", str_str_ft, None);
+        self.functions.insert("vibe_trim_end".into(), trim_end_fn);
+        let from_chars_ft = ptr_ty.fn_type(&[i64_ty.into()], false);
+        let from_chars_fn = self.llvm_module.add_function("vibe_from_chars", from_chars_ft, None);
+        self.functions.insert("vibe_from_chars".into(), from_chars_fn);
 
         // Declare region management functions (compiled inline as LLVM IR)
         self.declare_region_runtime();
@@ -1335,6 +1369,88 @@ impl<'ctx> Codegen<'ctx> {
                 if let Expr::Ident(name, _) = func_expr.as_ref() {
                     if name == "print" {
                         return self.compile_print(args, function);
+                    }
+
+                    // Math functions (f64 -> f64)
+                    let math_unary = ["sqrt", "sin", "cos", "tan", "log", "log2", "log10", "floor", "ceil", "round"];
+                    if math_unary.contains(&name.as_str()) && args.len() == 1 {
+                        let arg = self.compile_expr(&args[0], function)?.unwrap();
+                        let f64_arg = if arg.is_float_value() {
+                            arg.into_float_value()
+                        } else {
+                            let iv = self.ensure_i64(arg).into_int_value();
+                            self.builder.build_signed_int_to_float(iv, self.context.f64_type(), "itof")
+                                .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                        };
+                        let func = self.functions[name];
+                        let result = self.builder.build_call(func, &[f64_arg.into()], name)
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "pow" && args.len() == 2 {
+                        let base = self.compile_expr(&args[0], function)?.unwrap();
+                        let exp = self.compile_expr(&args[1], function)?.unwrap();
+                        let f64_ty = self.context.f64_type();
+                        let to_f64 = |v: BasicValueEnum<'ctx>, this: &Self| -> Result<inkwell::values::FloatValue<'ctx>, CodegenError> {
+                            if v.is_float_value() {
+                                Ok(v.into_float_value())
+                            } else {
+                                let iv = this.ensure_i64(v).into_int_value();
+                                this.builder.build_signed_int_to_float(iv, f64_ty, "itof")
+                                    .map_err(|e| CodegenError::Llvm(e.to_string()))
+                            }
+                        };
+                        let f_base = to_f64(base, self)?;
+                        let f_exp = to_f64(exp, self)?;
+                        let func = self.functions["pow"];
+                        let result = self.builder.build_call(func, &[f_base.into(), f_exp.into()], "pow")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "clamp" && args.len() == 3 {
+                        // clamp(value, low, high) = max(low, min(high, value))
+                        let val = self.compile_expr(&args[0], function)?.unwrap();
+                        let low = self.compile_expr(&args[1], function)?.unwrap();
+                        let high = self.compile_expr(&args[2], function)?.unwrap();
+                        let vi = self.ensure_i64(val).into_int_value();
+                        let li = self.ensure_i64(low).into_int_value();
+                        let hi = self.ensure_i64(high).into_int_value();
+                        // min(high, value)
+                        let cmp1 = self.builder.build_int_compare(IntPredicate::SLT, vi, hi, "cmp")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        let min_val = self.builder.build_select(cmp1, vi, hi, "min")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        // max(low, min_val)
+                        let min_i = min_val.into_int_value();
+                        let cmp2 = self.builder.build_int_compare(IntPredicate::SGT, min_i, li, "cmp")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        let result = self.builder.build_select(cmp2, min_i, li, "clamp")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(Some(result));
+                    }
+
+                    // String built-in functions
+                    if name == "trim_start" && args.len() == 1 {
+                        let s = self.compile_expr(&args[0], function)?.unwrap();
+                        let f = self.functions["vibe_trim_start"];
+                        let result = self.builder.build_call(f, &[s.into()], "trimmed")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "trim_end" && args.len() == 1 {
+                        let s = self.compile_expr(&args[0], function)?.unwrap();
+                        let f = self.functions["vibe_trim_end"];
+                        let result = self.builder.build_call(f, &[s.into()], "trimmed")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "from_chars" && args.len() == 1 {
+                        let chars = self.compile_expr(&args[0], function)?.unwrap();
+                        let chars_i64 = self.ensure_i64(chars);
+                        let f = self.functions["vibe_from_chars"];
+                        let result = self.builder.build_call(f, &[chars_i64.into()], "str")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
                     }
 
                     // create_channel(capacity) -> channel ptr
@@ -2196,6 +2312,12 @@ impl<'ctx> Codegen<'ctx> {
                 Ok(result.try_as_basic_value().left())
             }
 
+            Expr::UnsafeBlock(body, _) => {
+                // Unsafe blocks compile identically to their body — the safety
+                // boundary is enforced at the type-checking level, not codegen.
+                self.compile_expr(body, function)
+            }
+
             // List comprehension: compile as for-loop building a list
             Expr::ListComp(body, generators, filters, _) => {
                 // For now, compile as nested for loops with filter
@@ -2519,7 +2641,8 @@ impl<'ctx> Codegen<'ctx> {
                 Self::collect_free_vars(func, bound, free);
             }
             Expr::ChanCreate(cap, _) | Expr::SpawnActor(cap, _)
-            | Expr::Async(cap, _) | Expr::Await(cap, _) | Expr::Spawn(cap, _) => {
+            | Expr::Async(cap, _) | Expr::Await(cap, _) | Expr::Spawn(cap, _)
+            | Expr::UnsafeBlock(cap, _) => {
                 Self::collect_free_vars(cap, bound, free);
             }
             Expr::ListComp(body, generators, filters, _) => {
@@ -2555,16 +2678,23 @@ impl<'ctx> Codegen<'ctx> {
                         | PipelineStage::ForEach(e) | PipelineStage::SortBy(e)
                         | PipelineStage::GroupBy(e) | PipelineStage::Chunk(e)
                         | PipelineStage::Any(e) | PipelineStage::All(e)
-                        | PipelineStage::Reduce(e) | PipelineStage::Inspect(e) => {
+                        | PipelineStage::Reduce(e) | PipelineStage::Inspect(e)
+                        | PipelineStage::DistinctBy(e) | PipelineStage::Zip(e)
+                        | PipelineStage::MinBy(e) | PipelineStage::MaxBy(e)
+                        | PipelineStage::CollectMap(e) | PipelineStage::Merge(e)
+                        | PipelineStage::Broadcast(e) => {
                             Self::collect_free_vars(e, bound, free);
                         }
-                        PipelineStage::Fold(a, b) | PipelineStage::Scan(a, b) => {
+                        PipelineStage::Fold(a, b) | PipelineStage::Scan(a, b)
+                        | PipelineStage::Window(a, b) | PipelineStage::Batch(a, b)
+                        | PipelineStage::Parallel(a, b) => {
                             Self::collect_free_vars(a, bound, free);
                             Self::collect_free_vars(b, bound, free);
                         }
                         PipelineStage::Collect | PipelineStage::Count
                         | PipelineStage::First | PipelineStage::Last
-                        | PipelineStage::Distinct => {}
+                        | PipelineStage::Distinct | PipelineStage::CollectVec
+                        | PipelineStage::Sequential => {}
                     }
                 }
             }
@@ -5075,6 +5205,38 @@ impl<'ctx> Codegen<'ctx> {
             let result = self.builder.build_load(ptr_ty, result_head, "result").unwrap();
             self.builder.build_return(Some(&result)).unwrap();
         }
+
+        // --- External pipeline functions (implemented in C runtime) ---
+
+        // vibe_list_distinct_by(list, key_fn, region) -> list
+        let distinct_by_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()], false);
+        let distinct_by_fn = self.llvm_module.add_function("vibe_list_distinct_by", distinct_by_ty, None);
+        self.functions.insert("vibe_list_distinct_by".into(), distinct_by_fn);
+
+        // vibe_list_window(list, size, stride, region) -> list of lists
+        let window_ty = ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into(), i64_ty.into(), ptr_ty.into()], false);
+        let window_fn = self.llvm_module.add_function("vibe_list_window", window_ty, None);
+        self.functions.insert("vibe_list_window".into(), window_fn);
+
+        // vibe_list_zip(list1, list2, region) -> list of pairs
+        let zip_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()], false);
+        let zip_fn = self.llvm_module.add_function("vibe_list_zip", zip_ty, None);
+        self.functions.insert("vibe_list_zip".into(), zip_fn);
+
+        // vibe_list_min_by(list, key_fn) -> i64
+        let min_by_ty = i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let min_by_fn = self.llvm_module.add_function("vibe_list_min_by", min_by_ty, None);
+        self.functions.insert("vibe_list_min_by".into(), min_by_fn);
+
+        // vibe_list_max_by(list, key_fn) -> i64
+        let max_by_ty = i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let max_by_fn = self.llvm_module.add_function("vibe_list_max_by", max_by_ty, None);
+        self.functions.insert("vibe_list_max_by".into(), max_by_fn);
+
+        // vibe_list_merge(list1, list2, region) -> list
+        let merge_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()], false);
+        let merge_fn = self.llvm_module.add_function("vibe_list_merge", merge_ty, None);
+        self.functions.insert("vibe_list_merge".into(), merge_fn);
     }
 
     /// Try to compile a built-in pipeline function call (source, map, filter, fold, collect, etc.)
@@ -5410,6 +5572,106 @@ impl<'ctx> Codegen<'ctx> {
                 PipelineStage::Scan(_, _) | PipelineStage::SortBy(_) |
                 PipelineStage::GroupBy(_) | PipelineStage::Chunk(_) => {
                     // Complex stages: pass through for now
+                }
+                PipelineStage::DistinctBy(func_expr) => {
+                    // distinct_by(key_fn): keep first element per key_fn result
+                    // Implemented as identity for now (requires hash set in runtime)
+                    if let Some(func_ptr) = self.resolve_raw_fn_ptr(func_expr, function)? {
+                        if current.is_pointer_value() {
+                            let distinct_fn = self.functions["vibe_list_distinct_by"];
+                            let result = self.builder.build_call(
+                                distinct_fn,
+                                &[current.into(), func_ptr.into(), region_ptr.into()],
+                                "distinct_by",
+                            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            current = result.try_as_basic_value().left()
+                                .unwrap_or_else(|| ptr_ty.const_null().into());
+                        }
+                    }
+                }
+                PipelineStage::Window(size_expr, stride_expr) => {
+                    // window(size, stride): sliding window over list
+                    if current.is_pointer_value() {
+                        let size_val = self.compile_expr(size_expr, function)?.unwrap();
+                        let stride_val = self.compile_expr(stride_expr, function)?.unwrap();
+                        let s_i64 = self.ensure_i64(size_val);
+                        let st_i64 = self.ensure_i64(stride_val);
+                        let window_fn = self.functions["vibe_list_window"];
+                        let result = self.builder.build_call(
+                            window_fn,
+                            &[current.into(), s_i64.into(), st_i64.into(), region_ptr.into()],
+                            "windowed",
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        current = result.try_as_basic_value().left()
+                            .unwrap_or_else(|| ptr_ty.const_null().into());
+                    }
+                }
+                PipelineStage::Zip(other_expr) => {
+                    // zip(other_source): pair elements from two lists
+                    if current.is_pointer_value() {
+                        let other = self.compile_expr(other_expr, function)?.unwrap();
+                        let zip_fn = self.functions["vibe_list_zip"];
+                        let result = self.builder.build_call(
+                            zip_fn,
+                            &[current.into(), other.into(), region_ptr.into()],
+                            "zipped",
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        current = result.try_as_basic_value().left()
+                            .unwrap_or_else(|| ptr_ty.const_null().into());
+                    }
+                }
+                PipelineStage::MinBy(func_expr) => {
+                    if let Some(func_ptr) = self.resolve_raw_fn_ptr(func_expr, function)? {
+                        if current.is_pointer_value() {
+                            let min_by_fn = self.functions["vibe_list_min_by"];
+                            let result = self.builder.build_call(
+                                min_by_fn,
+                                &[current.into(), func_ptr.into()],
+                                "min_by",
+                            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            current = result.try_as_basic_value().left()
+                                .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+                        }
+                    }
+                }
+                PipelineStage::MaxBy(func_expr) => {
+                    if let Some(func_ptr) = self.resolve_raw_fn_ptr(func_expr, function)? {
+                        if current.is_pointer_value() {
+                            let max_by_fn = self.functions["vibe_list_max_by"];
+                            let result = self.builder.build_call(
+                                max_by_fn,
+                                &[current.into(), func_ptr.into()],
+                                "max_by",
+                            ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                            current = result.try_as_basic_value().left()
+                                .unwrap_or_else(|| i64_ty.const_int(0, false).into());
+                        }
+                    }
+                }
+                PipelineStage::CollectVec | PipelineStage::Sequential => {
+                    // Identity — list is already materialized
+                }
+                PipelineStage::CollectMap(func_expr) => {
+                    // collect_map(key_fn): collect into map (pass through for now)
+                    let _ = func_expr;
+                }
+                PipelineStage::Merge(other_expr) => {
+                    // merge(other): interleave elements from other list
+                    if current.is_pointer_value() {
+                        let other = self.compile_expr(other_expr, function)?.unwrap();
+                        let merge_fn = self.functions["vibe_list_merge"];
+                        let result = self.builder.build_call(
+                            merge_fn,
+                            &[current.into(), other.into(), region_ptr.into()],
+                            "merged",
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        current = result.try_as_basic_value().left()
+                            .unwrap_or_else(|| ptr_ty.const_null().into());
+                    }
+                }
+                PipelineStage::Broadcast(_) | PipelineStage::Batch(_, _) |
+                PipelineStage::Parallel(_, _) => {
+                    // Concurrency hints: pass through for now
                 }
             }
         }
