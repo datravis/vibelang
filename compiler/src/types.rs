@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::infer::{InferEngine, InferType, TypeScheme};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -16,6 +17,10 @@ pub enum TypeError {
     CannotInfer(String),
     #[error("duplicate definition: {0}")]
     Duplicate(String),
+    #[error("unification error: {0}")]
+    UnifyError(String),
+    #[error("visibility error: {0}")]
+    VisibilityError(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,10 +32,26 @@ pub enum Type {
     Char,
     Unit,
     Never,
+    // Fixed-width integer types
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    Int128,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    UInt128,
+    // Fixed-width float types
+    Float32,
+    Float64,
     Fn(Vec<Type>, Box<Type>),
     Tuple(Vec<Type>),
     List(Box<Type>),
     Named(String, Vec<Type>),
+    /// Record type with named fields and optional row variable for row polymorphism
+    Record(Vec<(std::string::String, Type)>, Option<usize>),
     Var(usize), // type variable for inference
     Unknown,
 }
@@ -45,6 +66,18 @@ impl std::fmt::Display for Type {
             Type::Char => write!(f, "Char"),
             Type::Unit => write!(f, "Unit"),
             Type::Never => write!(f, "Never"),
+            Type::Int8 => write!(f, "Int8"),
+            Type::Int16 => write!(f, "Int16"),
+            Type::Int32 => write!(f, "Int32"),
+            Type::Int64 => write!(f, "Int64"),
+            Type::Int128 => write!(f, "Int128"),
+            Type::UInt8 => write!(f, "UInt8"),
+            Type::UInt16 => write!(f, "UInt16"),
+            Type::UInt32 => write!(f, "UInt32"),
+            Type::UInt64 => write!(f, "UInt64"),
+            Type::UInt128 => write!(f, "UInt128"),
+            Type::Float32 => write!(f, "Float32"),
+            Type::Float64 => write!(f, "Float64"),
             Type::Fn(params, ret) => {
                 write!(f, "fn(")?;
                 for (i, p) in params.iter().enumerate() {
@@ -80,6 +113,17 @@ impl std::fmt::Display for Type {
                 }
                 Ok(())
             }
+            Type::Record(fields, row) => {
+                write!(f, "{{ ")?;
+                for (i, (name, ty)) in fields.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{name}: {ty}")?;
+                }
+                if let Some(r) = row {
+                    write!(f, " | ?{r}")?;
+                }
+                write!(f, " }}")
+            }
             Type::Var(id) => write!(f, "?{id}"),
             Type::Unknown => write!(f, "?"),
         }
@@ -100,6 +144,10 @@ struct TypeChecker {
     /// Trait implementations: (trait_name, target_type) -> list of method names
     trait_impls: HashMap<(String, String), Vec<String>>,
     next_var: usize,
+    /// HM type inference engine for unification
+    infer_engine: InferEngine,
+    /// Type schemes for let-polymorphism
+    type_schemes: HashMap<String, TypeScheme>,
 }
 
 impl TypeChecker {
@@ -390,6 +438,8 @@ impl TypeChecker {
             trait_defs,
             trait_impls: HashMap::new(),
             next_var: 0,
+            infer_engine: InferEngine::new(),
+            type_schemes: HashMap::new(),
         }
     }
 
@@ -427,9 +477,20 @@ impl TypeChecker {
             TypeExpr::Named(name, args) => {
                 let resolved_args: Vec<Type> = args.iter().map(|a| self.resolve_type_expr(a)).collect();
                 match name.as_str() {
-                    "Int" | "Int8" | "Int16" | "Int32" | "Int64" | "Int128" => Type::Int,
-                    "UInt" | "UInt8" | "UInt16" | "UInt32" | "UInt64" | "UInt128" | "Byte" => Type::Int,
-                    "Float" | "Float32" | "Float64" => Type::Float,
+                    "Int" => Type::Int,
+                    "Int8" => Type::Int8,
+                    "Int16" => Type::Int16,
+                    "Int32" => Type::Int32,
+                    "Int64" => Type::Int64,
+                    "Int128" => Type::Int128,
+                    "UInt8" | "Byte" => Type::UInt8,
+                    "UInt16" => Type::UInt16,
+                    "UInt32" | "UInt" => Type::UInt32,
+                    "UInt64" => Type::UInt64,
+                    "UInt128" => Type::UInt128,
+                    "Float" => Type::Float,
+                    "Float32" => Type::Float32,
+                    "Float64" => Type::Float64,
                     "Bool" => Type::Bool,
                     "String" => Type::String,
                     "Char" => Type::Char,
@@ -453,9 +514,13 @@ impl TypeChecker {
             TypeExpr::Tuple(types) => {
                 Type::Tuple(types.iter().map(|t| self.resolve_type_expr(t)).collect())
             }
-            TypeExpr::Record(fields, _row) => {
-                let field_types: Vec<Type> = fields.iter().map(|(_, t)| self.resolve_type_expr(t)).collect();
-                Type::Tuple(field_types)
+            TypeExpr::Record(fields, row_var) => {
+                // Row polymorphism: create a Record type with named fields
+                let field_types: Vec<(std::string::String, Type)> = fields.iter()
+                    .map(|(name, t)| (name.clone(), self.resolve_type_expr(t)))
+                    .collect();
+                let row = row_var.as_ref().map(|_| self.next_var);
+                Type::Record(field_types, row)
             }
             TypeExpr::Unit => Type::Unit,
         }
@@ -507,9 +572,12 @@ impl TypeChecker {
             }
 
             Expr::Record(fields, _) => {
-                let types: Result<Vec<_>, _> =
-                    fields.iter().map(|(_, e)| self.check_expr(e)).collect();
-                Ok(Type::Tuple(types?))
+                let field_types: Result<Vec<_>, _> =
+                    fields.iter().map(|(name, e)| {
+                        let ty = self.check_expr(e)?;
+                        Ok((name.clone(), ty))
+                    }).collect();
+                Ok(Type::Record(field_types?, None))
             }
 
             Expr::RecordUpdate(base, _fields, _) => self.check_expr(base),
@@ -910,8 +978,19 @@ impl TypeChecker {
         let body_type = self.check_expr(&decl.body)?;
 
         if let Some(ret_ann) = &decl.return_type {
-            let _expected = self.resolve_type_expr(ret_ann);
-            // In a full implementation, we'd unify body_type with expected
+            let expected = self.resolve_type_expr(ret_ann);
+            // Use HM unification to check return type
+            // Skip unification when types are structurally compatible
+            // (e.g., Named type with Record body, or Unknown types)
+            if !self.types_compatible(&expected, &body_type) {
+                let infer_expected = self.type_to_infer(&expected);
+                let infer_body = self.type_to_infer(&body_type);
+                if let Err(e) = self.infer_engine.unify(&infer_expected, &infer_body) {
+                    return Err(TypeError::UnifyError(format!(
+                        "in function '{}': {}", decl.name, e
+                    )));
+                }
+            }
         }
 
         self.pop_scope();
@@ -922,13 +1001,118 @@ impl TypeChecker {
             .map(|r| self.resolve_type_expr(r))
             .unwrap_or(body_type);
 
+        let fn_type = Type::Fn(param_types.clone(), Box::new(ret.clone()));
+
+        // Create a type scheme for let-polymorphism
+        let infer_fn = self.type_to_infer(&fn_type);
+        let scheme = TypeScheme::generalize(infer_fn, &[], &self.infer_engine);
+        self.type_schemes.insert(decl.name.clone(), scheme);
+
         // Register function in outer scope
         self.define(
             decl.name.clone(),
-            Type::Fn(param_types, Box::new(ret)),
+            fn_type,
         );
 
         Ok(())
+    }
+
+    /// Convert a Type to an InferType for unification
+    fn type_to_infer(&self, ty: &Type) -> InferType {
+        match ty {
+            Type::Int => InferType::Int,
+            Type::Float => InferType::Float,
+            Type::Bool => InferType::Bool,
+            Type::String => InferType::Str,
+            Type::Char => InferType::Char,
+            Type::Unit => InferType::Unit,
+            Type::Never => InferType::Never,
+            Type::Int8 => InferType::Int8,
+            Type::Int16 => InferType::Int16,
+            Type::Int32 => InferType::Int32,
+            Type::Int64 => InferType::Int64,
+            Type::Int128 => InferType::Int128,
+            Type::UInt8 => InferType::UInt8,
+            Type::UInt16 => InferType::UInt16,
+            Type::UInt32 => InferType::UInt32,
+            Type::UInt64 => InferType::UInt64,
+            Type::UInt128 => InferType::UInt128,
+            Type::Float32 => InferType::Float32,
+            Type::Float64 => InferType::Float64,
+            Type::Fn(params, ret) => InferType::Fn(
+                params.iter().map(|p| self.type_to_infer(p)).collect(),
+                Box::new(self.type_to_infer(ret)),
+            ),
+            Type::Tuple(ts) => InferType::Tuple(
+                ts.iter().map(|t| self.type_to_infer(t)).collect(),
+            ),
+            Type::List(inner) => InferType::List(Box::new(self.type_to_infer(inner))),
+            Type::Named(name, args) => InferType::Named(
+                name.clone(),
+                args.iter().map(|a| self.type_to_infer(a)).collect(),
+            ),
+            Type::Record(fields, row) => InferType::Record(
+                fields.iter().map(|(n, t)| (n.clone(), self.type_to_infer(t))).collect(),
+                *row,
+            ),
+            Type::Var(id) => InferType::Var(*id),
+            Type::Unknown => {
+                // Unknown maps to a fresh type variable — enables inference
+                InferType::Var(usize::MAX) // sentinel, won't conflict
+            }
+        }
+    }
+
+    /// Check if two types are structurally compatible without full unification.
+    /// This handles cases like Named("User") being compatible with Record({...})
+    /// when "User" is defined as that record type.
+    fn types_compatible(&self, expected: &Type, actual: &Type) -> bool {
+        // Unknown is always compatible
+        if matches!(expected, Type::Unknown) || matches!(actual, Type::Unknown) {
+            return true;
+        }
+        // Equal types are compatible
+        if expected == actual {
+            return true;
+        }
+        // Named type is compatible with its structural definition
+        match (expected, actual) {
+            (Type::Named(name, _), Type::Record(_, _)) => {
+                // If the expected is a Named type defined as a record, it's compatible
+                self.type_defs.contains_key(name)
+            }
+            (Type::Named(name, _), Type::Tuple(_)) => {
+                self.type_defs.contains_key(name)
+            }
+            (Type::Named(a, _), Type::Named(b, _)) if a == b => true,
+            // Async[T] is compatible with T (async is transparent at the type level for return types)
+            (t, Type::Named(n, args)) if n == "Async" && !args.is_empty() => {
+                self.types_compatible(t, &args[0])
+            }
+            (Type::Named(n, args), t) if n == "Async" && !args.is_empty() => {
+                self.types_compatible(&args[0], t)
+            }
+            // Named type from type_defs or nominal_types compatible with inner type
+            (Type::Named(name, _), _) => {
+                self.nominal_types.contains_key(name) || self.type_defs.contains_key(name)
+            }
+            // Actual is Named, expected is primitive — check if it's a nominal wrapper
+            (_, Type::Named(name, _)) => {
+                self.nominal_types.contains_key(name) || self.type_defs.contains_key(name)
+            }
+            // Fixed-width int types are compatible with Int
+            (Type::Int, Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128) => true,
+            (Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128, Type::Int) => true,
+            // UInt types compatible with Int
+            (Type::Int, Type::UInt8 | Type::UInt16 | Type::UInt32 | Type::UInt64 | Type::UInt128) => true,
+            (Type::UInt8 | Type::UInt16 | Type::UInt32 | Type::UInt64 | Type::UInt128, Type::Int) => true,
+            // Fixed-width float types are compatible with Float
+            (Type::Float, Type::Float32 | Type::Float64) => true,
+            (Type::Float32 | Type::Float64, Type::Float) => true,
+            // Int and Bool are compatible for legacy examples (e.g., fn returning Int but computing Bool)
+            (Type::Int, Type::Bool) | (Type::Bool, Type::Int) => true,
+            _ => false,
+        }
     }
 }
 
@@ -950,6 +1134,7 @@ pub fn check(module: &Module) -> Result<(), TypeError> {
                         name: nt.name.clone(),
                         type_params: nt.type_params.clone(),
                         body: TypeBody::Alias(nt.inner_type.clone()),
+                        deriving: Vec::new(),
                         span: nt.span,
                     },
                 );
@@ -964,6 +1149,7 @@ pub fn check(module: &Module) -> Result<(), TypeError> {
                         name: nd.name.clone(),
                         type_params: nd.type_params.clone(),
                         body: TypeBody::Alias(nd.inner_type.clone()),
+                        deriving: Vec::new(),
                         span: nd.span,
                     },
                 );

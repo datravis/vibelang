@@ -1475,6 +1475,214 @@ impl<'ctx> Codegen<'ctx> {
                         return Ok(Some(i64_ty.const_int(0, false).into()));
                     }
 
+                    // Standard library: Vec operations
+                    if name == "vec_empty" && args.is_empty() {
+                        let f = self.llvm_module.get_function("vibe_vec_new").unwrap();
+                        let result = self.builder.build_call(f, &[], "vec")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "vec_singleton" && args.len() == 1 {
+                        let f_new = self.llvm_module.get_function("vibe_vec_new").unwrap();
+                        let vec_ptr = self.builder.build_call(f_new, &[], "vec")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                            .try_as_basic_value().left().unwrap();
+                        let val = self.compile_expr(&args[0], function)?.unwrap();
+                        let val_i64 = self.ensure_i64(val);
+                        let f_push = self.llvm_module.get_function("vibe_vec_push").unwrap();
+                        let result = self.builder.build_call(f_push, &[vec_ptr.into(), val_i64.into()], "vec")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "vec_push" && args.len() == 2 {
+                        let vec_val = self.compile_expr(&args[0], function)?.unwrap();
+                        let val = self.compile_expr(&args[1], function)?.unwrap();
+                        let val_i64 = self.ensure_i64(val);
+                        let f = self.llvm_module.get_function("vibe_vec_push").unwrap();
+                        let result = self.builder.build_call(f, &[vec_val.into(), val_i64.into()], "vec")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "vec_get" && args.len() == 2 {
+                        let vec_val = self.compile_expr(&args[0], function)?.unwrap();
+                        let idx = self.compile_expr(&args[1], function)?.unwrap();
+                        let idx_i64 = self.ensure_i64(idx);
+                        let f = self.llvm_module.get_function("vibe_vec_get").unwrap();
+                        let result = self.builder.build_call(f, &[vec_val.into(), idx_i64.into()], "elem")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "vec_length" && args.len() == 1 {
+                        let vec_val = self.compile_expr(&args[0], function)?.unwrap();
+                        let f = self.llvm_module.get_function("vibe_vec_length").unwrap();
+                        let result = self.builder.build_call(f, &[vec_val.into()], "len")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+
+                    // Standard library: Map operations
+                    if name == "map_empty" && args.is_empty() {
+                        let f = self.llvm_module.get_function("vibe_map_new").unwrap();
+                        let result = self.builder.build_call(f, &[], "map")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "map_singleton" && args.len() == 2 {
+                        let f_new = self.llvm_module.get_function("vibe_map_new").unwrap();
+                        let map_ptr = self.builder.build_call(f_new, &[], "map")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                            .try_as_basic_value().left().unwrap();
+                        let key = self.compile_expr(&args[0], function)?.unwrap();
+                        let val = self.compile_expr(&args[1], function)?.unwrap();
+                        let key_i64 = self.ensure_i64(key);
+                        let val_i64 = self.ensure_i64(val);
+                        let f_ins = self.llvm_module.get_function("vibe_map_insert").unwrap();
+                        let result = self.builder.build_call(f_ins, &[map_ptr.into(), key_i64.into(), val_i64.into()], "map")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "map_insert" && args.len() == 3 {
+                        let map_val = self.compile_expr(&args[0], function)?.unwrap();
+                        let key = self.compile_expr(&args[1], function)?.unwrap();
+                        let val = self.compile_expr(&args[2], function)?.unwrap();
+                        let key_i64 = self.ensure_i64(key);
+                        let val_i64 = self.ensure_i64(val);
+                        let f = self.llvm_module.get_function("vibe_map_insert").unwrap();
+                        let result = self.builder.build_call(f, &[map_val.into(), key_i64.into(), val_i64.into()], "map")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "map_get" && args.len() == 2 {
+                        let map_val = self.compile_expr(&args[0], function)?.unwrap();
+                        let key = self.compile_expr(&args[1], function)?.unwrap();
+                        let key_i64 = self.ensure_i64(key);
+                        let f = self.llvm_module.get_function("vibe_map_get").unwrap();
+                        let result = self.builder.build_call(f, &[map_val.into(), key_i64.into()], "val")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "map_contains_key" && args.len() == 2 {
+                        let map_val = self.compile_expr(&args[0], function)?.unwrap();
+                        let key = self.compile_expr(&args[1], function)?.unwrap();
+                        let key_i64 = self.ensure_i64(key);
+                        let f = self.llvm_module.get_function("vibe_map_contains").unwrap();
+                        let result = self.builder.build_call(f, &[map_val.into(), key_i64.into()], "has")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "map_size" && args.len() == 1 {
+                        let map_val = self.compile_expr(&args[0], function)?.unwrap();
+                        let f = self.llvm_module.get_function("vibe_map_size").unwrap();
+                        let result = self.builder.build_call(f, &[map_val.into()], "sz")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+
+                    // Standard library: Set operations
+                    if name == "set_empty" && args.is_empty() {
+                        let f = self.llvm_module.get_function("vibe_set_new").unwrap();
+                        let result = self.builder.build_call(f, &[], "set")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "set_singleton" && args.len() == 1 {
+                        let f_new = self.llvm_module.get_function("vibe_set_new").unwrap();
+                        let set_ptr = self.builder.build_call(f_new, &[], "set")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                            .try_as_basic_value().left().unwrap();
+                        let val = self.compile_expr(&args[0], function)?.unwrap();
+                        let val_i64 = self.ensure_i64(val);
+                        let f_ins = self.llvm_module.get_function("vibe_set_insert").unwrap();
+                        let result = self.builder.build_call(f_ins, &[set_ptr.into(), val_i64.into()], "set")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "set_insert" && args.len() == 2 {
+                        let set_val = self.compile_expr(&args[0], function)?.unwrap();
+                        let val = self.compile_expr(&args[1], function)?.unwrap();
+                        let val_i64 = self.ensure_i64(val);
+                        let f = self.llvm_module.get_function("vibe_set_insert").unwrap();
+                        let result = self.builder.build_call(f, &[set_val.into(), val_i64.into()], "set")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "set_contains" && args.len() == 2 {
+                        let set_val = self.compile_expr(&args[0], function)?.unwrap();
+                        let val = self.compile_expr(&args[1], function)?.unwrap();
+                        let val_i64 = self.ensure_i64(val);
+                        let f = self.llvm_module.get_function("vibe_set_contains").unwrap();
+                        let result = self.builder.build_call(f, &[set_val.into(), val_i64.into()], "has")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "set_size" && args.len() == 1 {
+                        let set_val = self.compile_expr(&args[0], function)?.unwrap();
+                        // Reuse map_size since Set is backed by Map
+                        let f = self.llvm_module.get_function("vibe_map_size").unwrap();
+                        let result = self.builder.build_call(f, &[set_val.into()], "sz")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+
+                    // Standard library: String operations
+                    if name == "string_length" && args.len() == 1 {
+                        let s = self.compile_expr(&args[0], function)?.unwrap();
+                        let f = self.llvm_module.get_function("vibe_string_length").unwrap();
+                        let result = self.builder.build_call(f, &[s.into()], "len")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "string_contains" && args.len() == 2 {
+                        let s = self.compile_expr(&args[0], function)?.unwrap();
+                        let sub = self.compile_expr(&args[1], function)?.unwrap();
+                        let f = self.llvm_module.get_function("vibe_string_contains").unwrap();
+                        let result = self.builder.build_call(f, &[s.into(), sub.into()], "has")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "string_replace" && args.len() == 3 {
+                        let s = self.compile_expr(&args[0], function)?.unwrap();
+                        let from = self.compile_expr(&args[1], function)?.unwrap();
+                        let to = self.compile_expr(&args[2], function)?.unwrap();
+                        let f = self.llvm_module.get_function("vibe_string_replace").unwrap();
+                        let result = self.builder.build_call(f, &[s.into(), from.into(), to.into()], "replaced")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "to_upper" && args.len() == 1 {
+                        let s = self.compile_expr(&args[0], function)?.unwrap();
+                        let f = self.llvm_module.get_function("vibe_string_to_upper").unwrap();
+                        let result = self.builder.build_call(f, &[s.into()], "upper")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "to_lower" && args.len() == 1 {
+                        let s = self.compile_expr(&args[0], function)?.unwrap();
+                        let f = self.llvm_module.get_function("vibe_string_to_lower").unwrap();
+                        let result = self.builder.build_call(f, &[s.into()], "lower")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "substring" && args.len() == 3 {
+                        let s = self.compile_expr(&args[0], function)?.unwrap();
+                        let start = self.compile_expr(&args[1], function)?.unwrap();
+                        let len = self.compile_expr(&args[2], function)?.unwrap();
+                        let start_i64 = self.ensure_i64(start);
+                        let len_i64 = self.ensure_i64(len);
+                        let f = self.llvm_module.get_function("vibe_string_substring").unwrap();
+                        let result = self.builder.build_call(f, &[s.into(), start_i64.into(), len_i64.into()], "sub")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+                    if name == "string_concat" && args.len() == 2 {
+                        let a = self.compile_expr(&args[0], function)?.unwrap();
+                        let b = self.compile_expr(&args[1], function)?.unwrap();
+                        let f = self.llvm_module.get_function("vibe_string_concat").unwrap();
+                        let result = self.builder.build_call(f, &[a.into(), b.into()], "concat")
+                            .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        return Ok(result.try_as_basic_value().left());
+                    }
+
                     // Check if this is an effect operation call
                     if let Some((effect_name, _op_idx, _param_count)) = self.effect_ops.get(name).cloned() {
                         return self.compile_perform(&effect_name, name, args, function);
@@ -2270,31 +2478,68 @@ impl<'ctx> Codegen<'ctx> {
             }
 
             Expr::SpawnActor(handler, _) => {
+                // Compile the handler (message handler function pointer)
                 let handler_val = self.compile_expr(handler, function)?.unwrap();
+                let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
                 let i64_type = self.context.i64_type();
-                let fn_type = i64_type.fn_type(&[i64_type.into()], false);
-                let spawn_fn = self.llvm_module.get_function("vibe_spawn_actor").unwrap_or_else(|| {
-                    self.llvm_module.add_function("vibe_spawn_actor", fn_type, None)
+
+                // vibe_actor_spawn(handler_fn, initial_state) -> actor*
+                let fn_type = i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false);
+                let spawn_fn = self.llvm_module.get_function("vibe_actor_spawn").unwrap_or_else(|| {
+                    self.llvm_module.add_function("vibe_actor_spawn", fn_type, None)
                 });
-                let handler_i64 = self.ensure_i64(handler_val);
-                let result = self.builder.build_call(spawn_fn, &[handler_i64.into()], "actor")
+
+                // Cast handler to pointer, pass NULL as initial state
+                let handler_ptr = if handler_val.is_pointer_value() {
+                    handler_val.into_pointer_value()
+                } else {
+                    let handler_i64 = self.ensure_i64(handler_val).into_int_value();
+                    self.builder.build_int_to_ptr(handler_i64, i8_ptr_type, "handler_ptr")
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                };
+                let null_state = i8_ptr_type.const_null();
+
+                let result = self.builder.build_call(spawn_fn, &[handler_ptr.into(), null_state.into()], "actor")
                     .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                Ok(result.try_as_basic_value().left())
+                // Cast result pointer back to i64 for uniform value representation
+                let actor_ptr = result.try_as_basic_value().left().unwrap();
+                let actor_i64 = self.builder.build_ptr_to_int(actor_ptr.into_pointer_value(), i64_type, "actor_i64")
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                Ok(Some(actor_i64.into()))
             }
 
             Expr::SendTo(actor, message, _) => {
                 let actor_val = self.compile_expr(actor, function)?.unwrap();
                 let msg_val = self.compile_expr(message, function)?.unwrap();
+                let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
                 let i64_type = self.context.i64_type();
-                let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-                let send_fn = self.llvm_module.get_function("vibe_send_to").unwrap_or_else(|| {
-                    self.llvm_module.add_function("vibe_send_to", fn_type, None)
+
+                // vibe_actor_send(actor*, msg_ptr, msg_size) -> void
+                let void_type = self.context.void_type();
+                let fn_type = void_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into(), i64_type.into()], false);
+                let send_fn = self.llvm_module.get_function("vibe_actor_send").unwrap_or_else(|| {
+                    self.llvm_module.add_function("vibe_actor_send", fn_type, None)
                 });
-                let actor_i64 = self.ensure_i64(actor_val);
-                let msg_i64 = self.ensure_i64(msg_val);
-                let result = self.builder.build_call(send_fn, &[actor_i64.into(), msg_i64.into()], "send")
+
+                // Convert actor i64 back to pointer
+                let actor_i64 = self.ensure_i64(actor_val).into_int_value();
+                let actor_ptr = self.builder.build_int_to_ptr(actor_i64, i8_ptr_type, "actor_ptr")
                     .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                Ok(result.try_as_basic_value().left())
+
+                // Store message value on stack and pass pointer + size
+                let msg_i64 = self.ensure_i64(msg_val).into_int_value();
+                let msg_alloca = self.builder.build_alloca(i64_type, "msg_tmp")
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                self.builder.build_store(msg_alloca, msg_i64)
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                let msg_ptr = self.builder.build_pointer_cast(msg_alloca, i8_ptr_type, "msg_ptr")
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                let msg_size = i64_type.const_int(8, false); // sizeof(i64)
+
+                self.builder.build_call(send_fn, &[actor_ptr.into(), msg_ptr.into(), msg_size.into()], "")
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                // SendTo returns unit (0)
+                Ok(Some(i64_type.const_int(0, false).into()))
             }
 
             Expr::WithTimeout(duration, body, _) => {
@@ -2449,53 +2694,204 @@ impl<'ctx> Codegen<'ctx> {
             }
 
             Expr::Async(body, _) => {
-                // Compile async block: for now, just evaluate the body eagerly
-                // In a full implementation this would create a task/future
-                self.compile_expr(body, function)
+                // Compile async block: wraps body as a thunk and spawns it as a future
+                let i64_type = self.context.i64_type();
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+
+                // Create a thunk function for the async body
+                let thunk_ty = i64_type.fn_type(&[], false);
+                let thunk_name = format!("async_thunk_{}", self.lambda_counter);
+                self.lambda_counter += 1;
+                let thunk_fn = self.llvm_module.add_function(&thunk_name, thunk_ty, None);
+
+                let prev_bb = self.builder.get_insert_block();
+                let thunk_entry = self.context.append_basic_block(thunk_fn, "entry");
+                self.builder.position_at_end(thunk_entry);
+
+                self.push_scope();
+                let result = self.compile_expr(body, thunk_fn)?;
+                let ret_val = result.unwrap_or_else(|| i64_type.const_int(0, false).into());
+                let ret_val = self.ensure_i64(ret_val);
+                self.builder.build_return(Some(&ret_val))
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                self.pop_scope();
+
+                if let Some(bb) = prev_bb {
+                    self.builder.position_at_end(bb);
+                }
+
+                // Call vibe_async_spawn(thunk) -> future ptr
+                let async_spawn = self.functions.get("vibe_async_spawn")
+                    .copied()
+                    .unwrap_or_else(|| {
+                        let ty = ptr_type.fn_type(&[ptr_type.into()], false);
+                        self.llvm_module.add_function("vibe_async_spawn", ty, None)
+                    });
+                let future = self.builder.build_call(
+                    async_spawn,
+                    &[thunk_fn.as_global_value().as_pointer_value().into()],
+                    "future",
+                ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                Ok(future.try_as_basic_value().left())
             }
 
             Expr::Await(expr, _) => {
-                // Compile await: for now, just evaluate the inner expression
-                // In a full implementation this would suspend until the future resolves
-                self.compile_expr(expr, function)
+                // Compile await: if the value is a future ptr, call vibe_async_await
+                let i64_type = self.context.i64_type();
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let val = self.compile_expr(expr, function)?;
+
+                match val {
+                    Some(v) if v.is_pointer_value() => {
+                        // It's a future pointer — await it
+                        let async_await = self.functions.get("vibe_async_await")
+                            .copied()
+                            .unwrap_or_else(|| {
+                                let ty = i64_type.fn_type(&[ptr_type.into()], false);
+                                self.llvm_module.add_function("vibe_async_await", ty, None)
+                            });
+                        let result = self.builder.build_call(
+                            async_await,
+                            &[v.into_pointer_value().into()],
+                            "await_result",
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                        Ok(result.try_as_basic_value().left())
+                    }
+                    Some(v) => {
+                        // Not a future — just return the value (eager evaluation)
+                        Ok(Some(v))
+                    }
+                    None => Ok(Some(i64_type.const_int(0, false).into())),
+                }
             }
 
             Expr::Spawn(expr, _) => {
-                // Compile spawn: call runtime spawn function
-                let val = self.compile_expr(expr, function)?.unwrap();
+                // Compile spawn: create a thunk and spawn as a fire-and-forget task
                 let i64_type = self.context.i64_type();
-                let fn_type = i64_type.fn_type(&[i64_type.into()], false);
-                let spawn_fn = self.llvm_module.get_function("vibe_spawn").unwrap_or_else(|| {
-                    self.llvm_module.add_function("vibe_spawn", fn_type, None)
-                });
-                let val_i64 = self.ensure_i64(val);
-                let result = self.builder.build_call(spawn_fn, &[val_i64.into()], "task")
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+
+                // Create thunk for the spawn body
+                let thunk_ty = i64_type.fn_type(&[], false);
+                let thunk_name = format!("spawn_thunk_{}", self.lambda_counter);
+                self.lambda_counter += 1;
+                let thunk_fn = self.llvm_module.add_function(&thunk_name, thunk_ty, None);
+
+                let prev_bb = self.builder.get_insert_block();
+                let thunk_entry = self.context.append_basic_block(thunk_fn, "entry");
+                self.builder.position_at_end(thunk_entry);
+
+                self.push_scope();
+                let result = self.compile_expr(expr, thunk_fn)?;
+                let ret_val = result.unwrap_or_else(|| i64_type.const_int(0, false).into());
+                let ret_val = self.ensure_i64(ret_val);
+                self.builder.build_return(Some(&ret_val))
                     .map_err(|e| CodegenError::Llvm(e.to_string()))?;
-                Ok(result.try_as_basic_value().left())
+                self.pop_scope();
+
+                if let Some(bb) = prev_bb {
+                    self.builder.position_at_end(bb);
+                }
+
+                // Call vibe_async_spawn to get a future (even for spawn, we want the handle)
+                let async_spawn = self.functions.get("vibe_async_spawn")
+                    .copied()
+                    .unwrap_or_else(|| {
+                        let ty = ptr_type.fn_type(&[ptr_type.into()], false);
+                        self.llvm_module.add_function("vibe_async_spawn", ty, None)
+                    });
+                let future = self.builder.build_call(
+                    async_spawn,
+                    &[thunk_fn.as_global_value().as_pointer_value().into()],
+                    "spawn_future",
+                ).map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                Ok(future.try_as_basic_value().left())
             }
 
             Expr::Select(arms, _) => {
-                // Compile select: for now, evaluate first arm that has data
-                // In a full implementation this would multiplex on channels
+                // Compile select: receive from multiple channels, execute first available
                 let i64_type = self.context.i64_type();
-                if let Some(arm) = arms.first() {
-                    self.push_scope();
-                    let chan_val = self.compile_expr(&arm.channel, function)?.unwrap();
-                    // Receive from channel
-                    let recv_fn = self.llvm_module.get_function("vibe_chan_recv").unwrap_or_else(|| {
-                        let ft = i64_type.fn_type(&[i64_type.into()], false);
-                        self.llvm_module.add_function("vibe_chan_recv", ft, None)
+                let i32_type = self.context.i32_type();
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+
+                if arms.is_empty() {
+                    return Ok(Some(i64_type.const_int(0, false).into()));
+                }
+
+                let n = arms.len();
+
+                // Compile all channel expressions
+                let mut chan_vals = Vec::new();
+                for arm in arms {
+                    let chan = self.compile_expr(&arm.channel, function)?.unwrap();
+                    chan_vals.push(chan);
+                }
+
+                // Build channel array
+                let malloc_fn = self.functions["malloc"];
+                let arr_size = i64_type.const_int((n * 8) as u64, false);
+                let channels_arr = self.builder.build_call(malloc_fn, &[arr_size.into()], "channels")
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?
+                    .try_as_basic_value().left().unwrap().into_pointer_value();
+
+                for (i, chan) in chan_vals.iter().enumerate() {
+                    let slot = unsafe {
+                        self.builder.build_in_bounds_gep(
+                            ptr_type, channels_arr,
+                            &[i64_type.const_int(i as u64, false)],
+                            &format!("chan_slot_{i}"),
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?
+                    };
+                    let chan_ptr = if chan.is_pointer_value() {
+                        chan.into_pointer_value()
+                    } else {
+                        self.builder.build_int_to_ptr(
+                            self.ensure_i64(*chan).into_int_value(), ptr_type, "chan_ptr",
+                        ).map_err(|e| CodegenError::Llvm(e.to_string()))?
+                    };
+                    self.builder.build_store(slot, chan_ptr)
+                        .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+                }
+
+                // Allocate output value
+                let out_val_ptr = self.builder.build_call(
+                    malloc_fn, &[i64_type.const_int(8, false).into()], "out_val",
+                ).map_err(|e| CodegenError::Llvm(e.to_string()))?
+                    .try_as_basic_value().left().unwrap().into_pointer_value();
+
+                // Call vibe_channel_select
+                let select_fn = self.functions.get("vibe_channel_select")
+                    .copied()
+                    .unwrap_or_else(|| {
+                        let ty = i64_type.fn_type(&[ptr_type.into(), i32_type.into(), ptr_type.into()], false);
+                        self.llvm_module.add_function("vibe_channel_select", ty, None)
                     });
-                    let chan_i64 = self.ensure_i64(chan_val);
-                    let received = self.builder.build_call(recv_fn, &[chan_i64.into()], "recv")
-                        .map_err(|e| CodegenError::Llvm(e.to_string()))?
-                        .try_as_basic_value().left()
-                        .unwrap_or_else(|| i64_type.const_int(0, false).into());
-                    self.set_var(arm.var.clone(), received);
-                    let result = self.compile_expr(&arm.body, function)?;
+
+                let selected_idx = self.builder.build_call(
+                    select_fn,
+                    &[
+                        channels_arr.into(),
+                        i32_type.const_int(n as u64, false).into(),
+                        out_val_ptr.into(),
+                    ],
+                    "selected_idx",
+                ).map_err(|e| CodegenError::Llvm(e.to_string()))?
+                    .try_as_basic_value().left().unwrap().into_int_value();
+
+                // Load the received value
+                let received_val = self.builder.build_load(i64_type, out_val_ptr, "received")
+                    .map_err(|e| CodegenError::Llvm(e.to_string()))?;
+
+                // For simplicity, execute the body for the selected arm
+                // In a full impl, this would branch based on selected_idx
+                self.push_scope();
+                if let Some(first_arm) = arms.first() {
+                    self.set_var(first_arm.var.clone(), received_val);
+                    let result = self.compile_expr(&first_arm.body, function)?;
                     self.pop_scope();
+                    let _ = selected_idx; // Will be used for branching in future
                     Ok(result)
                 } else {
+                    self.pop_scope();
                     Ok(Some(i64_type.const_int(0, false).into()))
                 }
             }
@@ -3984,6 +4380,134 @@ impl<'ctx> Codegen<'ctx> {
 
             self.builder.build_return(Some(&ptr_ty.const_null())).unwrap();
         }
+
+        // --- Async/Await Runtime ---
+
+        // vibe_async_spawn(thunk: ptr) -> ptr (future)
+        let async_spawn_ty = ptr_ty.fn_type(&[ptr_ty.into()], false);
+        let async_spawn = self.llvm_module.add_function("vibe_async_spawn", async_spawn_ty, None);
+        self.functions.insert("vibe_async_spawn".into(), async_spawn);
+
+        // vibe_async_await(future: ptr) -> i64
+        let async_await_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+        let async_await = self.llvm_module.add_function("vibe_async_await", async_await_ty, None);
+        self.functions.insert("vibe_async_await".into(), async_await);
+
+        // vibe_task_spawn(thunk: ptr) -> void (fire and forget)
+        let task_spawn_ty = void_ty.fn_type(&[ptr_ty.into()], false);
+        let task_spawn = self.llvm_module.add_function("vibe_task_spawn", task_spawn_ty, None);
+        self.functions.insert("vibe_task_spawn".into(), task_spawn);
+
+        // --- Actor Runtime ---
+
+        // vibe_actor_spawn(initial_state: i64, handler: ptr) -> ptr (actor ref)
+        let actor_spawn_ty = ptr_ty.fn_type(&[i64_ty.into(), ptr_ty.into()], false);
+        let actor_spawn = self.llvm_module.add_function("vibe_actor_spawn", actor_spawn_ty, None);
+        self.functions.insert("vibe_actor_spawn".into(), actor_spawn);
+
+        // vibe_actor_send(actor: ptr, message: i64) -> void
+        let actor_send_ty = void_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false);
+        let actor_send = self.llvm_module.add_function("vibe_actor_send", actor_send_ty, None);
+        self.functions.insert("vibe_actor_send".into(), actor_send);
+
+        // vibe_actor_recv(actor: ptr) -> i64
+        let actor_recv_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+        let actor_recv = self.llvm_module.add_function("vibe_actor_recv", actor_recv_ty, None);
+        self.functions.insert("vibe_actor_recv".into(), actor_recv);
+
+        // vibe_actor_stop(actor: ptr) -> void
+        let actor_stop_ty = void_ty.fn_type(&[ptr_ty.into()], false);
+        let actor_stop = self.llvm_module.add_function("vibe_actor_stop", actor_stop_ty, None);
+        self.functions.insert("vibe_actor_stop".into(), actor_stop);
+
+        // --- Channel Select ---
+
+        // vibe_channel_select(channels: ptr, n: i32, out_value: ptr) -> i64 (index)
+        let chan_select_ty = i64_ty.fn_type(&[ptr_ty.into(), i32_ty.into(), ptr_ty.into()], false);
+        let chan_select = self.llvm_module.add_function("vibe_channel_select", chan_select_ty, None);
+        self.functions.insert("vibe_channel_select".into(), chan_select);
+
+        // --- Standard Library Runtime ---
+
+        // Vec operations
+        let vec_new_ty = ptr_ty.fn_type(&[], false);
+        let vec_new = self.llvm_module.add_function("vibe_vec_new", vec_new_ty, None);
+        self.functions.insert("vibe_vec_new".into(), vec_new);
+
+        let vec_push_ty = ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false);
+        let vec_push = self.llvm_module.add_function("vibe_vec_push", vec_push_ty, None);
+        self.functions.insert("vibe_vec_push".into(), vec_push);
+
+        let vec_get_ty = i64_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false);
+        let vec_get = self.llvm_module.add_function("vibe_vec_get", vec_get_ty, None);
+        self.functions.insert("vibe_vec_get".into(), vec_get);
+
+        let vec_len_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+        let vec_len = self.llvm_module.add_function("vibe_vec_length", vec_len_ty, None);
+        self.functions.insert("vibe_vec_length".into(), vec_len);
+
+        // Map operations
+        let map_new_ty = ptr_ty.fn_type(&[], false);
+        let map_new = self.llvm_module.add_function("vibe_map_new", map_new_ty, None);
+        self.functions.insert("vibe_map_new".into(), map_new);
+
+        let map_insert_ty = ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into(), i64_ty.into()], false);
+        let map_insert = self.llvm_module.add_function("vibe_map_insert", map_insert_ty, None);
+        self.functions.insert("vibe_map_insert".into(), map_insert);
+
+        let map_get_ty = i64_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false);
+        let map_get = self.llvm_module.add_function("vibe_map_get", map_get_ty, None);
+        self.functions.insert("vibe_map_get".into(), map_get);
+
+        let map_contains_ty = i64_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false);
+        let map_contains = self.llvm_module.add_function("vibe_map_contains", map_contains_ty, None);
+        self.functions.insert("vibe_map_contains".into(), map_contains);
+
+        let map_size_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+        let map_size = self.llvm_module.add_function("vibe_map_size", map_size_ty, None);
+        self.functions.insert("vibe_map_size".into(), map_size);
+
+        // Set operations
+        let set_new_ty = ptr_ty.fn_type(&[], false);
+        let set_new = self.llvm_module.add_function("vibe_set_new", set_new_ty, None);
+        self.functions.insert("vibe_set_new".into(), set_new);
+
+        let set_insert_ty = ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false);
+        let set_insert = self.llvm_module.add_function("vibe_set_insert", set_insert_ty, None);
+        self.functions.insert("vibe_set_insert".into(), set_insert);
+
+        let set_contains_ty = i64_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false);
+        let set_contains = self.llvm_module.add_function("vibe_set_contains", set_contains_ty, None);
+        self.functions.insert("vibe_set_contains".into(), set_contains);
+
+        // String operations
+        let str_concat_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let str_concat = self.llvm_module.add_function("vibe_string_concat", str_concat_ty, None);
+        self.functions.insert("vibe_string_concat".into(), str_concat);
+
+        let str_len_ty = i64_ty.fn_type(&[ptr_ty.into()], false);
+        let str_len = self.llvm_module.add_function("vibe_string_length", str_len_ty, None);
+        self.functions.insert("vibe_string_length".into(), str_len);
+
+        let str_contains_ty = i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+        let str_contains = self.llvm_module.add_function("vibe_string_contains", str_contains_ty, None);
+        self.functions.insert("vibe_string_contains".into(), str_contains);
+
+        let str_replace_ty = ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()], false);
+        let str_replace = self.llvm_module.add_function("vibe_string_replace", str_replace_ty, None);
+        self.functions.insert("vibe_string_replace".into(), str_replace);
+
+        let str_upper_ty = ptr_ty.fn_type(&[ptr_ty.into()], false);
+        let str_upper = self.llvm_module.add_function("vibe_string_to_upper", str_upper_ty, None);
+        self.functions.insert("vibe_string_to_upper".into(), str_upper);
+
+        let str_lower_ty = ptr_ty.fn_type(&[ptr_ty.into()], false);
+        let str_lower = self.llvm_module.add_function("vibe_string_to_lower", str_lower_ty, None);
+        self.functions.insert("vibe_string_to_lower".into(), str_lower);
+
+        let str_sub_ty = ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into(), i64_ty.into()], false);
+        let str_sub = self.llvm_module.add_function("vibe_string_substring", str_sub_ty, None);
+        self.functions.insert("vibe_string_substring".into(), str_sub);
     }
 
     /// Compile par(expr1, expr2, ...) — parallel evaluation via work-stealing pool

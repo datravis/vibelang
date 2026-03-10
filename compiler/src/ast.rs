@@ -1,5 +1,12 @@
 use crate::lexer::Span;
 
+/// Visibility of a declaration
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Visibility {
+    Public,
+    Private,
+}
+
 #[derive(Debug, Clone)]
 pub struct Module {
     pub name: Vec<String>,
@@ -74,6 +81,7 @@ pub enum TypeExpr {
     Named(String, Vec<TypeExpr>),
     Function(Vec<TypeExpr>, Box<TypeExpr>, Vec<TypeExpr>),
     Tuple(Vec<TypeExpr>),
+    /// Record type with optional row variable for row polymorphism: { name: String | r }
     Record(Vec<(String, TypeExpr)>, Option<String>),
     Unit,
 }
@@ -84,6 +92,7 @@ pub struct TypeDef {
     pub name: String,
     pub type_params: Vec<String>,
     pub body: TypeBody,
+    pub deriving: Vec<String>,
     pub span: Span,
 }
 

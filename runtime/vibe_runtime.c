@@ -974,3 +974,492 @@ char *vibe_from_chars(vibe_cons_t *chars) {
     result[n] = '\0';
     return result;
 }
+
+/* ============================================================
+ * Effect Handler Runtime
+ * ============================================================ */
+
+#define VIBE_MAX_HANDLERS 256
+
+typedef struct {
+    uint64_t effect_hash;
+    uint64_t op_hash;
+    vibe_handler_fn handler;
+    void *user_data;
+} vibe_handler_entry_t;
+
+static __thread vibe_handler_entry_t handler_stack[VIBE_MAX_HANDLERS];
+static __thread int handler_top = 0;
+static __thread int64_t resume_value = 0;
+
+void vibe_handler_push(uint64_t effect_hash, uint64_t op_hash,
+                       vibe_handler_fn handler, void *user_data) {
+    if (handler_top >= VIBE_MAX_HANDLERS) {
+        fprintf(stderr, "vibe: handler stack overflow\n");
+        return;
+    }
+    handler_stack[handler_top].effect_hash = effect_hash;
+    handler_stack[handler_top].op_hash = op_hash;
+    handler_stack[handler_top].handler = handler;
+    handler_stack[handler_top].user_data = user_data;
+    handler_top++;
+}
+
+void vibe_handler_pop(void) {
+    if (handler_top > 0) handler_top--;
+}
+
+int64_t vibe_handler_perform(uint64_t effect_hash, uint64_t op_hash, int64_t arg) {
+    /* Search the handler stack from top to bottom */
+    for (int i = handler_top - 1; i >= 0; i--) {
+        if (handler_stack[i].effect_hash == effect_hash &&
+            handler_stack[i].op_hash == op_hash) {
+            return handler_stack[i].handler(arg, NULL, handler_stack[i].user_data);
+        }
+    }
+    /* No handler found — check by effect only (wildcard op) */
+    for (int i = handler_top - 1; i >= 0; i--) {
+        if (handler_stack[i].effect_hash == effect_hash &&
+            handler_stack[i].op_hash == 0) {
+            return handler_stack[i].handler(arg, NULL, handler_stack[i].user_data);
+        }
+    }
+    fprintf(stderr, "vibe: unhandled effect perform (effect=%lu, op=%lu)\n",
+            (unsigned long)effect_hash, (unsigned long)op_hash);
+    return 0;
+}
+
+int64_t vibe_handler_resume(int64_t value) {
+    resume_value = value;
+    return value;
+}
+
+/* ============================================================
+ * Async/Await Runtime
+ * ============================================================ */
+
+struct vibe_future {
+    int64_t result;
+    atomic_int completed;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+};
+
+typedef struct {
+    vibe_thunk_fn thunk;
+    vibe_future_t *future;
+} vibe_async_task_t;
+
+static void *vibe_async_worker(void *arg) {
+    vibe_async_task_t *task = (vibe_async_task_t *)arg;
+    int64_t result = task->thunk();
+
+    pthread_mutex_lock(&task->future->mutex);
+    task->future->result = result;
+    atomic_store(&task->future->completed, 1);
+    pthread_cond_broadcast(&task->future->cond);
+    pthread_mutex_unlock(&task->future->mutex);
+
+    free(task);
+    return NULL;
+}
+
+vibe_future_t *vibe_async_spawn(vibe_thunk_fn thunk) {
+    vibe_future_t *future = (vibe_future_t *)calloc(1, sizeof(vibe_future_t));
+    pthread_mutex_init(&future->mutex, NULL);
+    pthread_cond_init(&future->cond, NULL);
+    atomic_store(&future->completed, 0);
+
+    vibe_async_task_t *task = (vibe_async_task_t *)malloc(sizeof(vibe_async_task_t));
+    task->thunk = thunk;
+    task->future = future;
+
+    pthread_t thread;
+    pthread_create(&thread, NULL, vibe_async_worker, task);
+    pthread_detach(thread);
+
+    return future;
+}
+
+int64_t vibe_async_await(vibe_future_t *future) {
+    pthread_mutex_lock(&future->mutex);
+    while (!atomic_load(&future->completed)) {
+        pthread_cond_wait(&future->cond, &future->mutex);
+    }
+    int64_t result = future->result;
+    pthread_mutex_unlock(&future->mutex);
+    return result;
+}
+
+void vibe_task_spawn(vibe_thunk_fn thunk) {
+    vibe_future_t *f = vibe_async_spawn(thunk);
+    (void)f; /* Fire and forget — future will be collected */
+}
+
+/* ============================================================
+ * Actor Runtime
+ * ============================================================ */
+
+#define VIBE_ACTOR_MAILBOX_SIZE 1024
+
+struct vibe_actor {
+    int64_t state;
+    vibe_actor_handler_fn handler;
+    vibe_channel_t *mailbox;
+    atomic_int running;
+    pthread_t thread;
+};
+
+static void *vibe_actor_loop(void *arg) {
+    vibe_actor_t *actor = (vibe_actor_t *)arg;
+
+    while (atomic_load(&actor->running)) {
+        int64_t msg = vibe_channel_recv(actor->mailbox);
+        if (!atomic_load(&actor->running)) break;
+        actor->state = actor->handler(actor->state, msg);
+    }
+
+    return NULL;
+}
+
+vibe_actor_t *vibe_actor_spawn(int64_t initial_state, vibe_actor_handler_fn handler) {
+    vibe_actor_t *actor = (vibe_actor_t *)calloc(1, sizeof(vibe_actor_t));
+    actor->state = initial_state;
+    actor->handler = handler;
+    actor->mailbox = vibe_channel_create(VIBE_ACTOR_MAILBOX_SIZE);
+    atomic_store(&actor->running, 1);
+
+    pthread_create(&actor->thread, NULL, vibe_actor_loop, actor);
+
+    return actor;
+}
+
+void vibe_actor_send(vibe_actor_t *actor, int64_t message) {
+    vibe_channel_send(actor->mailbox, message);
+}
+
+int64_t vibe_actor_recv(vibe_actor_t *actor) {
+    return vibe_channel_recv(actor->mailbox);
+}
+
+void vibe_actor_stop(vibe_actor_t *actor) {
+    atomic_store(&actor->running, 0);
+    /* Send a dummy message to unblock the receive */
+    vibe_channel_send(actor->mailbox, 0);
+    pthread_join(actor->thread, NULL);
+    vibe_channel_destroy(actor->mailbox);
+    free(actor);
+}
+
+/* ============================================================
+ * Channel Select
+ * ============================================================ */
+
+int64_t vibe_channel_try_recv(vibe_channel_t *ch, int64_t *out_value) {
+    /* Simple non-blocking receive using the existing channel internals.
+     * For a full implementation we'd access the channel struct directly,
+     * but since channel internals are opaque, we use a polling approach. */
+    /* For now, delegate to blocking recv in a separate thread — simplified. */
+    *out_value = vibe_channel_recv(ch);
+    return 1;
+}
+
+int64_t vibe_channel_select(vibe_channel_t **channels, int n, int64_t *out_value) {
+    /* Round-robin polling: try each channel in order.
+     * In production, this would use epoll/kqueue for efficiency. */
+    for (int i = 0; i < n; i++) {
+        int64_t val;
+        if (vibe_channel_try_recv(channels[i], &val)) {
+            *out_value = val;
+            return i;
+        }
+    }
+    /* Fallback: block on first channel */
+    *out_value = vibe_channel_recv(channels[0]);
+    return 0;
+}
+
+/* ============================================================
+ * Standard Library: Vec (Dynamic Array)
+ * ============================================================ */
+
+#define VIBE_VEC_INITIAL_CAP 8
+
+vibe_vec_t *vibe_vec_new(void) {
+    vibe_vec_t *v = (vibe_vec_t *)calloc(1, sizeof(vibe_vec_t));
+    v->data = (int64_t *)malloc(VIBE_VEC_INITIAL_CAP * sizeof(int64_t));
+    v->length = 0;
+    v->capacity = VIBE_VEC_INITIAL_CAP;
+    return v;
+}
+
+vibe_vec_t *vibe_vec_push(vibe_vec_t *v, int64_t value) {
+    if (v->length >= v->capacity) {
+        v->capacity *= 2;
+        v->data = (int64_t *)realloc(v->data, v->capacity * sizeof(int64_t));
+    }
+    v->data[v->length++] = value;
+    return v;
+}
+
+int64_t vibe_vec_get(vibe_vec_t *v, int64_t index) {
+    if (index < 0 || index >= v->length) {
+        fprintf(stderr, "vibe: vec index out of bounds: %ld (length %ld)\n",
+                (long)index, (long)v->length);
+        return 0;
+    }
+    return v->data[index];
+}
+
+vibe_vec_t *vibe_vec_set(vibe_vec_t *v, int64_t index, int64_t value) {
+    if (index >= 0 && index < v->length) {
+        v->data[index] = value;
+    }
+    return v;
+}
+
+int64_t vibe_vec_length(vibe_vec_t *v) {
+    return v->length;
+}
+
+void vibe_vec_free(vibe_vec_t *v) {
+    if (v) {
+        free(v->data);
+        free(v);
+    }
+}
+
+vibe_cons_t *vibe_vec_to_list(vibe_vec_t *v, void *region) {
+    vibe_cons_t *head = NULL;
+    for (int64_t i = v->length - 1; i >= 0; i--) {
+        vibe_cons_t *cell = (vibe_cons_t *)(region ? malloc(sizeof(vibe_cons_t)) : malloc(sizeof(vibe_cons_t)));
+        cell->value = v->data[i];
+        cell->next = head;
+        head = cell;
+    }
+    return head;
+}
+
+/* ============================================================
+ * Standard Library: Map (Hash Table)
+ * ============================================================ */
+
+#define VIBE_MAP_INITIAL_CAP 16
+#define VIBE_MAP_LOAD_FACTOR 0.75
+
+typedef struct vibe_map_entry {
+    int64_t key;
+    int64_t value;
+    int occupied;
+    struct vibe_map_entry *chain;
+} vibe_map_entry_t;
+
+struct vibe_map {
+    vibe_map_entry_t *buckets;
+    int64_t capacity;
+    int64_t size;
+};
+
+static uint64_t vibe_hash_i64(int64_t key) {
+    uint64_t h = (uint64_t)key;
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33;
+    h *= 0xc4ceb9fe1a85ec53ULL;
+    h ^= h >> 33;
+    return h;
+}
+
+vibe_map_t *vibe_map_new(void) {
+    vibe_map_t *m = (vibe_map_t *)calloc(1, sizeof(vibe_map_t));
+    m->capacity = VIBE_MAP_INITIAL_CAP;
+    m->buckets = (vibe_map_entry_t *)calloc(m->capacity, sizeof(vibe_map_entry_t));
+    m->size = 0;
+    return m;
+}
+
+vibe_map_t *vibe_map_insert(vibe_map_t *m, int64_t key, int64_t value) {
+    uint64_t h = vibe_hash_i64(key) % (uint64_t)m->capacity;
+    vibe_map_entry_t *entry = &m->buckets[h];
+
+    if (!entry->occupied) {
+        entry->key = key;
+        entry->value = value;
+        entry->occupied = 1;
+        entry->chain = NULL;
+        m->size++;
+        return m;
+    }
+
+    /* Walk chain looking for existing key */
+    vibe_map_entry_t *cur = entry;
+    while (cur) {
+        if (cur->key == key) {
+            cur->value = value;
+            return m;
+        }
+        if (!cur->chain) break;
+        cur = cur->chain;
+    }
+
+    /* Append new entry to chain */
+    vibe_map_entry_t *new_entry = (vibe_map_entry_t *)calloc(1, sizeof(vibe_map_entry_t));
+    new_entry->key = key;
+    new_entry->value = value;
+    new_entry->occupied = 1;
+    cur->chain = new_entry;
+    m->size++;
+    return m;
+}
+
+int64_t vibe_map_get(vibe_map_t *m, int64_t key) {
+    uint64_t h = vibe_hash_i64(key) % (uint64_t)m->capacity;
+    vibe_map_entry_t *entry = &m->buckets[h];
+
+    while (entry && entry->occupied) {
+        if (entry->key == key) return entry->value;
+        entry = entry->chain;
+    }
+    return 0; /* Key not found */
+}
+
+int64_t vibe_map_contains(vibe_map_t *m, int64_t key) {
+    uint64_t h = vibe_hash_i64(key) % (uint64_t)m->capacity;
+    vibe_map_entry_t *entry = &m->buckets[h];
+
+    while (entry && entry->occupied) {
+        if (entry->key == key) return 1;
+        entry = entry->chain;
+    }
+    return 0;
+}
+
+int64_t vibe_map_size(vibe_map_t *m) {
+    return m->size;
+}
+
+void vibe_map_free(vibe_map_t *m) {
+    if (!m) return;
+    for (int64_t i = 0; i < m->capacity; i++) {
+        vibe_map_entry_t *chain = m->buckets[i].chain;
+        while (chain) {
+            vibe_map_entry_t *next = chain->chain;
+            free(chain);
+            chain = next;
+        }
+    }
+    free(m->buckets);
+    free(m);
+}
+
+/* ============================================================
+ * Standard Library: Set (Hash Set)
+ * ============================================================ */
+
+struct vibe_set {
+    vibe_map_t *inner; /* Backed by a map with dummy values */
+};
+
+vibe_set_t *vibe_set_new(void) {
+    vibe_set_t *s = (vibe_set_t *)calloc(1, sizeof(vibe_set_t));
+    s->inner = vibe_map_new();
+    return s;
+}
+
+vibe_set_t *vibe_set_insert(vibe_set_t *s, int64_t value) {
+    vibe_map_insert(s->inner, value, 1);
+    return s;
+}
+
+int64_t vibe_set_contains(vibe_set_t *s, int64_t value) {
+    return vibe_map_contains(s->inner, value);
+}
+
+int64_t vibe_set_size(vibe_set_t *s) {
+    return vibe_map_size(s->inner);
+}
+
+void vibe_set_free(vibe_set_t *s) {
+    if (s) {
+        vibe_map_free(s->inner);
+        free(s);
+    }
+}
+
+/* ============================================================
+ * Standard Library: String Operations
+ * ============================================================ */
+
+char *vibe_string_concat(const char *a, const char *b) {
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    char *result = (char *)malloc(la + lb + 1);
+    memcpy(result, a, la);
+    memcpy(result + la, b, lb);
+    result[la + lb] = '\0';
+    return result;
+}
+
+char *vibe_string_substring(const char *s, int64_t start, int64_t end) {
+    size_t len = strlen(s);
+    if (start < 0) start = 0;
+    if ((size_t)end > len) end = (int64_t)len;
+    if (start >= end) {
+        char *empty = (char *)malloc(1);
+        empty[0] = '\0';
+        return empty;
+    }
+    size_t sub_len = (size_t)(end - start);
+    char *result = (char *)malloc(sub_len + 1);
+    memcpy(result, s + start, sub_len);
+    result[sub_len] = '\0';
+    return result;
+}
+
+int64_t vibe_string_length(const char *s) {
+    return (int64_t)strlen(s);
+}
+
+int64_t vibe_string_contains(const char *haystack, const char *needle) {
+    return strstr(haystack, needle) != NULL ? 1 : 0;
+}
+
+char *vibe_string_replace(const char *s, const char *from, const char *to) {
+    const char *pos = strstr(s, from);
+    if (!pos) {
+        char *copy = (char *)malloc(strlen(s) + 1);
+        strcpy(copy, s);
+        return copy;
+    }
+
+    size_t from_len = strlen(from);
+    size_t to_len = strlen(to);
+    size_t prefix_len = (size_t)(pos - s);
+    size_t suffix_len = strlen(pos + from_len);
+    char *result = (char *)malloc(prefix_len + to_len + suffix_len + 1);
+    memcpy(result, s, prefix_len);
+    memcpy(result + prefix_len, to, to_len);
+    memcpy(result + prefix_len + to_len, pos + from_len, suffix_len);
+    result[prefix_len + to_len + suffix_len] = '\0';
+    return result;
+}
+
+char *vibe_string_to_upper(const char *s) {
+    size_t len = strlen(s);
+    char *result = (char *)malloc(len + 1);
+    for (size_t i = 0; i < len; i++) {
+        result[i] = (s[i] >= 'a' && s[i] <= 'z') ? s[i] - 32 : s[i];
+    }
+    result[len] = '\0';
+    return result;
+}
+
+char *vibe_string_to_lower(const char *s) {
+    size_t len = strlen(s);
+    char *result = (char *)malloc(len + 1);
+    for (size_t i = 0; i < len; i++) {
+        result[i] = (s[i] >= 'A' && s[i] <= 'Z') ? s[i] + 32 : s[i];
+    }
+    result[len] = '\0';
+    return result;
+}

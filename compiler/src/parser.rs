@@ -538,6 +538,7 @@ impl Parser {
                     name,
                     type_params,
                     body: TypeBody::Alias(ty),
+                    deriving: Vec::new(),
                     span,
                 });
             }
@@ -607,11 +608,35 @@ impl Parser {
             TypeBody::Alias(ty)
         };
 
+        // Parse optional deriving clause: deriving(Show, Eq, Ord, Hash)
+        let deriving = if *self.peek() == TokenKind::Deriving {
+            self.advance();
+            self.expect(&TokenKind::LParen)?;
+            let mut traits = Vec::new();
+            loop {
+                if *self.peek() == TokenKind::RParen {
+                    break;
+                }
+                let (trait_name, _) = self.expect_type_ident()?;
+                traits.push(trait_name);
+                if *self.peek() == TokenKind::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RParen)?;
+            traits
+        } else {
+            Vec::new()
+        };
+
         Ok(TypeDef {
             public,
             name,
             type_params,
             body,
+            deriving,
             span,
         })
     }
@@ -1348,6 +1373,26 @@ impl Parser {
 
             // Lambda: fn(x, y) = body
             TokenKind::Fn => self.parse_lambda(),
+
+            // Perform expression: perform Effect.operation(args...)
+            TokenKind::Perform => {
+                let span = self.span();
+                self.advance();
+                let (effect_name, _) = self.expect_type_ident()?;
+                self.expect(&TokenKind::Dot)?;
+                let (op_name, _) = self.expect_ident()?;
+                self.expect(&TokenKind::LParen)?;
+                let mut args = Vec::new();
+                if *self.peek() != TokenKind::RParen {
+                    args.push(self.parse_expr()?);
+                    while *self.peek() == TokenKind::Comma {
+                        self.advance();
+                        args.push(self.parse_expr()?);
+                    }
+                }
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::Perform(effect_name, op_name, args, span))
+            }
 
             // Handle expression: handle <expr> with <EffectName> { handlers }
             TokenKind::Handle => self.parse_handle_expr(),

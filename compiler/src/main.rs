@@ -2,8 +2,11 @@
 
 mod ast;
 mod codegen;
+mod derive;
+mod infer;
 mod lexer;
 mod memory;
+mod module;
 mod parser;
 mod types;
 
@@ -108,7 +111,23 @@ fn run_parse(file: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
 fn run_check(file: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let source = std::fs::read_to_string(file)?;
     let tokens = lexer::lex(&source)?;
-    let module = parser::parse(tokens)?;
+    let mut module = parser::parse(tokens)?;
+
+    // Generate derived trait implementations
+    let derived_impls = derive::generate_derived_impls(&module)?;
+    module.declarations.extend(derived_impls);
+
+    // Register module and check visibility
+    let mut registry = module::ModuleRegistry::new();
+    registry.register_module(&module)?;
+    let vis_errors = module::check_visibility(&module);
+    if !vis_errors.is_empty() {
+        for err in &vis_errors {
+            eprintln!("visibility error: {err}");
+        }
+        return Err(vis_errors.into_iter().next().unwrap().into());
+    }
+
     types::check(&module)?;
     println!("OK: type check passed");
     Ok(())
@@ -123,7 +142,12 @@ fn run_build(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = std::fs::read_to_string(file)?;
     let tokens = lexer::lex(&source)?;
-    let module = parser::parse(tokens)?;
+    let mut module = parser::parse(tokens)?;
+
+    // Generate derived trait implementations
+    let derived_impls = derive::generate_derived_impls(&module)?;
+    module.declarations.extend(derived_impls);
+
     types::check(&module)?;
 
     let default_output = file.with_extension(if emit_ir { "ll" } else { "o" });
@@ -153,7 +177,12 @@ fn run_targets() -> Result<(), Box<dyn std::error::Error>> {
 fn run_run(file: &std::path::Path, opt_level: u8) -> Result<(), Box<dyn std::error::Error>> {
     let source = std::fs::read_to_string(file)?;
     let tokens = lexer::lex(&source)?;
-    let module = parser::parse(tokens)?;
+    let mut module = parser::parse(tokens)?;
+
+    // Generate derived trait implementations
+    let derived_impls = derive::generate_derived_impls(&module)?;
+    module.declarations.extend(derived_impls);
+
     types::check(&module)?;
     codegen::jit_run(&module, opt_level)?;
     Ok(())
