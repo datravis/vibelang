@@ -212,6 +212,12 @@ pub struct InferEngine {
     pub subst: Substitution,
 }
 
+impl Default for InferEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InferEngine {
     pub fn new() -> Self {
         Self {
@@ -256,7 +262,7 @@ impl InferEngine {
             InferType::Named(_, args) => args.iter().any(|a| self.occurs_in(var, a)),
             InferType::Record(fields, row) => {
                 fields.iter().any(|(_, t)| self.occurs_in(var, t))
-                    || row.map_or(false, |r| r == var)
+                    || row.is_some_and(|r| r == var)
             }
             _ => false,
         }

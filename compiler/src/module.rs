@@ -86,13 +86,13 @@ impl ModuleRegistry {
                 match &import.items {
                     ImportItems::All => {
                         // Import all public names
-                        for (name, _) in &resolved.public_functions {
+                        for name in resolved.public_functions.keys() {
                             imported.insert(name.clone(), ImportedName {
                                 source_module: mod_path.clone(),
                                 original_name: name.clone(),
                             });
                         }
-                        for (name, _) in &resolved.public_types {
+                        for name in resolved.public_types.keys() {
                             imported.insert(name.clone(), ImportedName {
                                 source_module: mod_path.clone(),
                                 original_name: name.clone(),
@@ -132,7 +132,7 @@ impl ModuleRegistry {
                     }
                     ImportItems::Alias(alias) => {
                         // Module alias: import all public names under the alias prefix
-                        for (name, _) in &resolved.public_functions {
+                        for name in resolved.public_functions.keys() {
                             imported.insert(
                                 format!("{}.{}", alias, name),
                                 ImportedName {

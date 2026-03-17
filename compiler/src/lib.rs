@@ -3,6 +3,7 @@
 pub mod ast;
 pub mod codegen;
 pub mod derive;
+pub mod exhaustiveness;
 pub mod infer;
 pub mod lexer;
 pub mod memory;

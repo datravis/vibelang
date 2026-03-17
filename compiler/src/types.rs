@@ -148,6 +148,11 @@ struct TypeChecker {
     infer_engine: InferEngine,
     /// Type schemes for let-polymorphism
     type_schemes: HashMap<String, TypeScheme>,
+    /// Effect type variables in scope (e.g., `E` in `fn twice[A, E](f: fn() -> A with E)`)
+    /// Maps effect variable name to its declared effects (empty = polymorphic)
+    effect_type_vars: HashMap<String, Vec<String>>,
+    /// Current function's declared effects (concrete + polymorphic)
+    current_fn_effects: Vec<TypeExpr>,
 }
 
 impl TypeChecker {
@@ -440,6 +445,8 @@ impl TypeChecker {
             next_var: 0,
             infer_engine: InferEngine::new(),
             type_schemes: HashMap::new(),
+            effect_type_vars: HashMap::new(),
+            current_fn_effects: Vec::new(),
         }
     }
 

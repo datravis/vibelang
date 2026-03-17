@@ -3,6 +3,7 @@
 mod ast;
 mod codegen;
 mod derive;
+mod exhaustiveness;
 mod infer;
 mod lexer;
 mod memory;
@@ -129,6 +130,15 @@ fn run_check(file: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     types::check(&module)?;
+
+    // Check exhaustiveness of pattern matches
+    let exhaust_errors = exhaustiveness::check_exhaustiveness(&module);
+    if !exhaust_errors.is_empty() {
+        for err in &exhaust_errors {
+            eprintln!("warning: {err}");
+        }
+    }
+
     println!("OK: type check passed");
     Ok(())
 }
@@ -149,6 +159,12 @@ fn run_build(
     module.declarations.extend(derived_impls);
 
     types::check(&module)?;
+
+    // Check exhaustiveness of pattern matches
+    let exhaust_errors = exhaustiveness::check_exhaustiveness(&module);
+    for err in &exhaust_errors {
+        eprintln!("warning: {err}");
+    }
 
     let default_output = file.with_extension(if emit_ir { "ll" } else { "o" });
     let out_path = output.unwrap_or(&default_output);
@@ -184,6 +200,13 @@ fn run_run(file: &std::path::Path, opt_level: u8) -> Result<(), Box<dyn std::err
     module.declarations.extend(derived_impls);
 
     types::check(&module)?;
+
+    // Check exhaustiveness of pattern matches
+    let exhaust_errors = exhaustiveness::check_exhaustiveness(&module);
+    for err in &exhaust_errors {
+        eprintln!("warning: {err}");
+    }
+
     codegen::jit_run(&module, opt_level)?;
     Ok(())
 }
