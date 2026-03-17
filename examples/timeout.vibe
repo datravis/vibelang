@@ -1,0 +1,11 @@
+--- Timeout example
+
+module timeout_example
+
+--- Use with_timeout to limit execution time
+fn fetch_with_limit() -> Int =
+    with_timeout(5000, 42)
+
+fn main() -> Unit with IO = do
+    let result = fetch_with_limit()
+    print(show(result))

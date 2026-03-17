@@ -1,0 +1,18 @@
+--- Let-else example
+--- Pattern guard: let pat = expr else fallback
+
+module let_else_example
+
+fn safe_divide(a: Int, b: Int) -> Int = do
+    let result = a / b else panic("division error")
+    result
+
+fn get_value() -> Int = do
+    let x = 42 else panic("impossible")
+    x
+
+fn main() -> Unit with IO = do
+    let val = get_value()
+    print(show(val))
+    let div = safe_divide(10, 2)
+    print(show(div))

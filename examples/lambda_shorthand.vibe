@@ -1,0 +1,9 @@
+-- Lambda shorthand with backslash syntax
+fn apply(f: fn(Int) -> Int, x: Int) -> Int = f(x)
+
+fn main() -> Unit = do
+    let double = \x -> x * 2
+    let result = apply(double, 21)
+    print(result)
+    let add = \x, y -> x + y
+    print(add(10, 20))

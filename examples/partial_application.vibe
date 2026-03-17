@@ -1,0 +1,12 @@
+-- Partial application using underscore placeholders
+fn add(a: Int, b: Int) -> Int = a + b
+
+fn multiply(a: Int, b: Int) -> Int = a * b
+
+fn main() -> Unit = do
+    let add_five = add(5, _)
+    let double = multiply(2, _)
+    let result = add_five(3)
+    print(result)
+    let doubled = double(10)
+    print(doubled)

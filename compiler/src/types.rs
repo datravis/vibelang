@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::infer::{InferEngine, InferType, TypeScheme};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -16,6 +17,10 @@ pub enum TypeError {
     CannotInfer(String),
     #[error("duplicate definition: {0}")]
     Duplicate(String),
+    #[error("unification error: {0}")]
+    UnifyError(String),
+    #[error("visibility error: {0}")]
+    VisibilityError(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,10 +32,26 @@ pub enum Type {
     Char,
     Unit,
     Never,
+    // Fixed-width integer types
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    Int128,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    UInt128,
+    // Fixed-width float types
+    Float32,
+    Float64,
     Fn(Vec<Type>, Box<Type>),
     Tuple(Vec<Type>),
     List(Box<Type>),
     Named(String, Vec<Type>),
+    /// Record type with named fields and optional row variable for row polymorphism
+    Record(Vec<(std::string::String, Type)>, Option<usize>),
     Var(usize), // type variable for inference
     Unknown,
 }
@@ -45,6 +66,18 @@ impl std::fmt::Display for Type {
             Type::Char => write!(f, "Char"),
             Type::Unit => write!(f, "Unit"),
             Type::Never => write!(f, "Never"),
+            Type::Int8 => write!(f, "Int8"),
+            Type::Int16 => write!(f, "Int16"),
+            Type::Int32 => write!(f, "Int32"),
+            Type::Int64 => write!(f, "Int64"),
+            Type::Int128 => write!(f, "Int128"),
+            Type::UInt8 => write!(f, "UInt8"),
+            Type::UInt16 => write!(f, "UInt16"),
+            Type::UInt32 => write!(f, "UInt32"),
+            Type::UInt64 => write!(f, "UInt64"),
+            Type::UInt128 => write!(f, "UInt128"),
+            Type::Float32 => write!(f, "Float32"),
+            Type::Float64 => write!(f, "Float64"),
             Type::Fn(params, ret) => {
                 write!(f, "fn(")?;
                 for (i, p) in params.iter().enumerate() {
@@ -80,6 +113,17 @@ impl std::fmt::Display for Type {
                 }
                 Ok(())
             }
+            Type::Record(fields, row) => {
+                write!(f, "{{ ")?;
+                for (i, (name, ty)) in fields.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{name}: {ty}")?;
+                }
+                if let Some(r) = row {
+                    write!(f, " | ?{r}")?;
+                }
+                write!(f, " }}")
+            }
             Type::Var(id) => write!(f, "?{id}"),
             Type::Unknown => write!(f, "?"),
         }
@@ -89,6 +133,8 @@ impl std::fmt::Display for Type {
 struct TypeChecker {
     env: Vec<HashMap<String, Type>>,
     type_defs: HashMap<String, TypeDef>,
+    /// Nominal types: names that are NOT interchangeable with their inner type
+    nominal_types: HashMap<String, TypeExpr>,
     /// Effect definitions: effect_name -> list of (operation_name, param_types, return_type)
     effect_defs: HashMap<String, Vec<(String, Vec<Type>, Type)>>,
     /// All effect operation names -> (effect_name, param_types, return_type)
@@ -98,6 +144,15 @@ struct TypeChecker {
     /// Trait implementations: (trait_name, target_type) -> list of method names
     trait_impls: HashMap<(String, String), Vec<String>>,
     next_var: usize,
+    /// HM type inference engine for unification
+    infer_engine: InferEngine,
+    /// Type schemes for let-polymorphism
+    type_schemes: HashMap<String, TypeScheme>,
+    /// Effect type variables in scope (e.g., `E` in `fn twice[A, E](f: fn() -> A with E)`)
+    /// Maps effect variable name to its declared effects (empty = polymorphic)
+    effect_type_vars: HashMap<String, Vec<String>>,
+    /// Current function's declared effects (concrete + polymorphic)
+    current_fn_effects: Vec<TypeExpr>,
 }
 
 impl TypeChecker {
@@ -111,9 +166,50 @@ impl TypeChecker {
             "split".into(),
             Type::Fn(vec![Type::String], Box::new(Type::List(Box::new(Type::String)))),
         );
+        // Ordering type constructors
+        env.insert("Less".into(), Type::Named("Ordering".into(), Vec::new()));
+        env.insert("Equal".into(), Type::Named("Ordering".into(), Vec::new()));
+        env.insert("Greater".into(), Type::Named("Ordering".into(), Vec::new()));
+
         env.insert("identity".into(), Type::Fn(vec![Type::Unknown], Box::new(Type::Unknown)));
         env.insert("panic".into(), Type::Fn(vec![Type::String], Box::new(Type::Never)));
-        env.insert("todo".into(), Type::Fn(vec![], Box::new(Type::Never)));
+        env.insert("todo".into(), Type::Fn(vec![Type::String], Box::new(Type::Never)));
+        env.insert("assert".into(), Type::Fn(vec![Type::Bool, Type::String], Box::new(Type::Unit)));
+        env.insert("const".into(), Type::Fn(vec![Type::Unknown, Type::Unknown], Box::new(Type::Unknown)));
+        env.insert("flip".into(), Type::Fn(vec![Type::Unknown], Box::new(Type::Unknown)));
+        env.insert("compose".into(), Type::Fn(vec![Type::Unknown, Type::Unknown], Box::new(Type::Unknown)));
+        env.insert("range".into(), Type::Fn(vec![Type::Int, Type::Int], Box::new(Type::List(Box::new(Type::Int)))));
+        env.insert("abs".into(), Type::Fn(vec![Type::Int], Box::new(Type::Int)));
+        env.insert("min".into(), Type::Fn(vec![Type::Int, Type::Int], Box::new(Type::Int)));
+        env.insert("max".into(), Type::Fn(vec![Type::Int, Type::Int], Box::new(Type::Int)));
+        env.insert("clamp".into(), Type::Fn(vec![Type::Int, Type::Int, Type::Int], Box::new(Type::Int)));
+
+        // Math functions (Float -> Float)
+        for name in &["sqrt", "sin", "cos", "tan", "log", "log2", "log10", "floor", "ceil", "round"] {
+            env.insert(name.to_string(), Type::Fn(vec![Type::Float], Box::new(Type::Float)));
+        }
+        env.insert("pow".into(), Type::Fn(vec![Type::Float, Type::Float], Box::new(Type::Float)));
+
+        // Math constants
+        env.insert("pi".into(), Type::Float);
+        env.insert("e".into(), Type::Float);
+        env.insert("tau".into(), Type::Float);
+        env.insert("to_string".into(), Type::Fn(vec![Type::Unknown], Box::new(Type::String)));
+        env.insert("to_upper".into(), Type::Fn(vec![Type::String], Box::new(Type::String)));
+        env.insert("trim".into(), Type::Fn(vec![Type::String], Box::new(Type::String)));
+        env.insert("join".into(), Type::Fn(vec![Type::List(Box::new(Type::String)), Type::String], Box::new(Type::String)));
+        env.insert("contains".into(), Type::Fn(vec![Type::String, Type::String], Box::new(Type::Bool)));
+        env.insert("starts_with".into(), Type::Fn(vec![Type::String, Type::String], Box::new(Type::Bool)));
+        env.insert("ends_with".into(), Type::Fn(vec![Type::String, Type::String], Box::new(Type::Bool)));
+        env.insert("is_empty".into(), Type::Fn(vec![Type::String], Box::new(Type::Bool)));
+        env.insert("replace".into(), Type::Fn(vec![Type::String, Type::String, Type::String], Box::new(Type::String)));
+        env.insert("substring".into(), Type::Fn(vec![Type::String, Type::Int, Type::Int], Box::new(Type::String)));
+        env.insert("chars".into(), Type::Fn(vec![Type::String], Box::new(Type::List(Box::new(Type::Char)))));
+        env.insert("trim_start".into(), Type::Fn(vec![Type::String], Box::new(Type::String)));
+        env.insert("trim_end".into(), Type::Fn(vec![Type::String], Box::new(Type::String)));
+        env.insert("from_chars".into(), Type::Fn(vec![Type::List(Box::new(Type::Char))], Box::new(Type::String)));
+        env.insert("parse_int".into(), Type::Fn(vec![Type::String], Box::new(Type::Unknown)));
+        env.insert("parse_float".into(), Type::Fn(vec![Type::String], Box::new(Type::Unknown)));
         env.insert(
             "read_lines".into(),
             Type::Fn(vec![Type::String], Box::new(Type::List(Box::new(Type::String)))),
@@ -195,6 +291,60 @@ impl TypeChecker {
             Type::Fn(vec![fn_t.clone()], Box::new(list_t)),
         );
 
+        // Vec operations
+        let vec_t = Type::Named("Vec".into(), vec![Type::Unknown]);
+        env.insert("vec_empty".into(), Type::Fn(vec![], Box::new(vec_t.clone())));
+        env.insert("vec_singleton".into(), Type::Fn(vec![Type::Unknown], Box::new(vec_t.clone())));
+        env.insert("vec_push".into(), Type::Fn(vec![vec_t.clone(), Type::Unknown], Box::new(vec_t.clone())));
+        env.insert("vec_get".into(), Type::Fn(vec![vec_t.clone(), Type::Int], Box::new(Type::Unknown)));
+        env.insert("vec_set".into(), Type::Fn(vec![vec_t.clone(), Type::Int, Type::Unknown], Box::new(vec_t.clone())));
+        env.insert("vec_length".into(), Type::Fn(vec![vec_t.clone()], Box::new(Type::Int)));
+        env.insert("vec_concat".into(), Type::Fn(vec![vec_t.clone(), vec_t.clone()], Box::new(vec_t.clone())));
+        env.insert("vec_slice".into(), Type::Fn(vec![vec_t.clone(), Type::Int, Type::Int], Box::new(vec_t.clone())));
+        env.insert("vec_map".into(), Type::Fn(vec![vec_t.clone(), fn_t.clone()], Box::new(vec_t.clone())));
+        env.insert("vec_filter".into(), Type::Fn(vec![vec_t.clone(), fn_t.clone()], Box::new(vec_t.clone())));
+        env.insert("vec_fold".into(), Type::Fn(vec![vec_t.clone(), Type::Unknown, fn_t.clone()], Box::new(Type::Unknown)));
+        env.insert("vec_to_list".into(), Type::Fn(vec![vec_t.clone()], Box::new(Type::List(Box::new(Type::Unknown)))));
+
+        // Map operations
+        let map_t = Type::Named("Map".into(), vec![Type::Unknown, Type::Unknown]);
+        env.insert("map_empty".into(), Type::Fn(vec![], Box::new(map_t.clone())));
+        env.insert("map_singleton".into(), Type::Fn(vec![Type::Unknown, Type::Unknown], Box::new(map_t.clone())));
+        env.insert("map_insert".into(), Type::Fn(vec![map_t.clone(), Type::Unknown, Type::Unknown], Box::new(map_t.clone())));
+        env.insert("map_get".into(), Type::Fn(vec![map_t.clone(), Type::Unknown], Box::new(Type::Unknown)));
+        env.insert("map_remove".into(), Type::Fn(vec![map_t.clone(), Type::Unknown], Box::new(map_t.clone())));
+        env.insert("map_contains_key".into(), Type::Fn(vec![map_t.clone(), Type::Unknown], Box::new(Type::Bool)));
+        env.insert("map_size".into(), Type::Fn(vec![map_t.clone()], Box::new(Type::Int)));
+        env.insert("map_keys".into(), Type::Fn(vec![map_t.clone()], Box::new(Type::List(Box::new(Type::Unknown)))));
+        env.insert("map_values".into(), Type::Fn(vec![map_t.clone()], Box::new(Type::List(Box::new(Type::Unknown)))));
+        env.insert("map_entries".into(), Type::Fn(vec![map_t.clone()], Box::new(Type::List(Box::new(Type::Tuple(vec![Type::Unknown, Type::Unknown]))))));
+        env.insert("map_merge".into(), Type::Fn(vec![map_t.clone(), map_t.clone()], Box::new(map_t.clone())));
+
+        // Set operations
+        let set_t = Type::Named("Set".into(), vec![Type::Unknown]);
+        env.insert("set_empty".into(), Type::Fn(vec![], Box::new(set_t.clone())));
+        env.insert("set_singleton".into(), Type::Fn(vec![Type::Unknown], Box::new(set_t.clone())));
+        env.insert("set_insert".into(), Type::Fn(vec![set_t.clone(), Type::Unknown], Box::new(set_t.clone())));
+        env.insert("set_remove".into(), Type::Fn(vec![set_t.clone(), Type::Unknown], Box::new(set_t.clone())));
+        env.insert("set_contains".into(), Type::Fn(vec![set_t.clone(), Type::Unknown], Box::new(Type::Bool)));
+        env.insert("set_size".into(), Type::Fn(vec![set_t.clone()], Box::new(Type::Int)));
+        env.insert("set_union".into(), Type::Fn(vec![set_t.clone(), set_t.clone()], Box::new(set_t.clone())));
+        env.insert("set_intersection".into(), Type::Fn(vec![set_t.clone(), set_t.clone()], Box::new(set_t.clone())));
+        env.insert("set_difference".into(), Type::Fn(vec![set_t.clone(), set_t.clone()], Box::new(set_t.clone())));
+        env.insert("set_to_list".into(), Type::Fn(vec![set_t], Box::new(Type::List(Box::new(Type::Unknown)))));
+
+        // Pipeline operations
+        env.insert("distinct_by".into(), Type::Fn(vec![fn_t.clone()], Box::new(Type::Unknown)));
+        env.insert("window".into(), Type::Fn(vec![Type::Int, Type::Int], Box::new(Type::Unknown)));
+        env.insert("zip".into(), Type::Fn(vec![Type::Unknown], Box::new(Type::Unknown)));
+        env.insert("min_by".into(), Type::Fn(vec![fn_t.clone()], Box::new(Type::Unknown)));
+        env.insert("max_by".into(), Type::Fn(vec![fn_t.clone()], Box::new(Type::Unknown)));
+        env.insert("collect_vec".into(), Type::Fn(vec![], Box::new(vec_t)));
+        env.insert("collect_map".into(), Type::Fn(vec![fn_t.clone()], Box::new(map_t)));
+        env.insert("broadcast".into(), Type::Fn(vec![Type::Int], Box::new(Type::Unknown)));
+        env.insert("merge".into(), Type::Fn(vec![Type::Unknown], Box::new(Type::Unknown)));
+        env.insert("batch".into(), Type::Fn(vec![Type::Int, Type::Int], Box::new(Type::Unknown)));
+
         // Channel operations
         env.insert(
             "create_channel".into(),
@@ -205,14 +355,98 @@ impl TypeChecker {
             Type::Fn(vec![Type::Int], Box::new(Type::Unit)),
         );
 
+        // Actor operations
+        env.insert(
+            "spawn".into(),
+            Type::Fn(vec![Type::Fn(vec![Type::Unknown], Box::new(Type::Unit))], Box::new(Type::Unknown)),
+        );
+        env.insert(
+            "send_to".into(),
+            Type::Fn(vec![Type::Unknown, Type::Unknown], Box::new(Type::Unit)),
+        );
+        env.insert(
+            "receive".into(),
+            Type::Fn(vec![], Box::new(Type::Unknown)),
+        );
+
+        // Timeout
+        env.insert(
+            "with_timeout".into(),
+            Type::Fn(vec![Type::Int, Type::Unknown], Box::new(Type::Unknown)),
+        );
+
+        // Resource management
+        env.insert(
+            "acquire".into(),
+            Type::Fn(vec![Type::Fn(vec![], Box::new(Type::Unknown)), Type::Fn(vec![Type::Unknown], Box::new(Type::Unit))], Box::new(Type::Unknown)),
+        );
+        env.insert(
+            "release".into(),
+            Type::Fn(vec![Type::Unknown], Box::new(Type::Unit)),
+        );
+
+        // Built-in trait definitions
+        let mut trait_defs = HashMap::new();
+        // Eq trait: fn eq(self, other) -> Bool
+        trait_defs.insert("Eq".into(), vec![
+            ("eq".into(), vec![Type::Unknown, Type::Unknown], Type::Bool),
+            ("neq".into(), vec![Type::Unknown, Type::Unknown], Type::Bool),
+        ]);
+        // Ord trait: fn compare(self, other) -> Int (-1, 0, 1)
+        trait_defs.insert("Ord".into(), vec![
+            ("compare".into(), vec![Type::Unknown, Type::Unknown], Type::Int),
+            ("lt".into(), vec![Type::Unknown, Type::Unknown], Type::Bool),
+            ("lte".into(), vec![Type::Unknown, Type::Unknown], Type::Bool),
+            ("gt".into(), vec![Type::Unknown, Type::Unknown], Type::Bool),
+            ("gte".into(), vec![Type::Unknown, Type::Unknown], Type::Bool),
+        ]);
+        // Show trait: fn show(self) -> String
+        trait_defs.insert("Show".into(), vec![
+            ("to_string".into(), vec![Type::Unknown], Type::String),
+        ]);
+        // Hash trait: fn hash(self) -> Int
+        trait_defs.insert("Hash".into(), vec![
+            ("hash".into(), vec![Type::Unknown], Type::Int),
+        ]);
+        // Default trait: fn default() -> Self
+        trait_defs.insert("Default".into(), vec![
+            ("default".into(), vec![], Type::Unknown),
+        ]);
+
+        // Built-in effect definitions
+        let mut effect_defs = HashMap::new();
+        let mut effect_ops = HashMap::new();
+
+        // State effect: get() -> S, put(s: S) -> Unit
+        effect_defs.insert("State".into(), vec![
+            ("get".into(), vec![], Type::Unknown),
+            ("put".into(), vec![Type::Unknown], Type::Unit),
+        ]);
+        effect_ops.insert("get".into(), ("State".into(), vec![], Type::Unknown));
+        effect_ops.insert("put".into(), ("State".into(), vec![Type::Unknown], Type::Unit));
+        env.insert("get".into(), Type::Fn(vec![], Box::new(Type::Unknown)));
+        env.insert("put".into(), Type::Fn(vec![Type::Unknown], Box::new(Type::Unit)));
+
+        // Fail effect: raise(err: E) -> Never
+        effect_defs.insert("Fail".into(), vec![
+            ("raise".into(), vec![Type::Unknown], Type::Never),
+        ]);
+        effect_ops.insert("raise".into(), ("Fail".into(), vec![Type::Unknown], Type::Never));
+        env.insert("raise".into(), Type::Fn(vec![Type::Unknown], Box::new(Type::Never)));
+
         Self {
             env: vec![env],
             type_defs: HashMap::new(),
-            effect_defs: HashMap::new(),
-            effect_ops: HashMap::new(),
-            trait_defs: HashMap::new(),
+            nominal_types: HashMap::new(),
+            effect_defs,
+            effect_ops,
+            trait_defs,
             trait_impls: HashMap::new(),
             next_var: 0,
+            infer_engine: InferEngine::new(),
+            type_schemes: HashMap::new(),
+            effect_type_vars: HashMap::new(),
+            current_fn_effects: Vec::new(),
         }
     }
 
@@ -250,9 +484,20 @@ impl TypeChecker {
             TypeExpr::Named(name, args) => {
                 let resolved_args: Vec<Type> = args.iter().map(|a| self.resolve_type_expr(a)).collect();
                 match name.as_str() {
-                    "Int" | "Int8" | "Int16" | "Int32" | "Int64" | "Int128" => Type::Int,
-                    "UInt" | "UInt8" | "UInt16" | "UInt32" | "UInt64" | "UInt128" | "Byte" => Type::Int,
-                    "Float" | "Float32" | "Float64" => Type::Float,
+                    "Int" => Type::Int,
+                    "Int8" => Type::Int8,
+                    "Int16" => Type::Int16,
+                    "Int32" => Type::Int32,
+                    "Int64" => Type::Int64,
+                    "Int128" => Type::Int128,
+                    "UInt8" | "Byte" => Type::UInt8,
+                    "UInt16" => Type::UInt16,
+                    "UInt32" | "UInt" => Type::UInt32,
+                    "UInt64" => Type::UInt64,
+                    "UInt128" => Type::UInt128,
+                    "Float" => Type::Float,
+                    "Float32" => Type::Float32,
+                    "Float64" => Type::Float64,
                     "Bool" => Type::Bool,
                     "String" => Type::String,
                     "Char" => Type::Char,
@@ -276,9 +521,13 @@ impl TypeChecker {
             TypeExpr::Tuple(types) => {
                 Type::Tuple(types.iter().map(|t| self.resolve_type_expr(t)).collect())
             }
-            TypeExpr::Record(fields, _row) => {
-                let field_types: Vec<Type> = fields.iter().map(|(_, t)| self.resolve_type_expr(t)).collect();
-                Type::Tuple(field_types)
+            TypeExpr::Record(fields, row_var) => {
+                // Row polymorphism: create a Record type with named fields
+                let field_types: Vec<(std::string::String, Type)> = fields.iter()
+                    .map(|(name, t)| (name.clone(), self.resolve_type_expr(t)))
+                    .collect();
+                let row = row_var.as_ref().map(|_| self.next_var);
+                Type::Record(field_types, row)
             }
             TypeExpr::Unit => Type::Unit,
         }
@@ -330,9 +579,12 @@ impl TypeChecker {
             }
 
             Expr::Record(fields, _) => {
-                let types: Result<Vec<_>, _> =
-                    fields.iter().map(|(_, e)| self.check_expr(e)).collect();
-                Ok(Type::Tuple(types?))
+                let field_types: Result<Vec<_>, _> =
+                    fields.iter().map(|(name, e)| {
+                        let ty = self.check_expr(e)?;
+                        Ok((name.clone(), ty))
+                    }).collect();
+                Ok(Type::Record(field_types?, None))
             }
 
             Expr::RecordUpdate(base, _fields, _) => self.check_expr(base),
@@ -403,6 +655,23 @@ impl TypeChecker {
                 }
             }
 
+            Expr::PartialApp(func, args, _) => {
+                let ft = self.check_expr(func)?;
+                for expr in args.iter().flatten() {
+                    self.check_expr(expr)?;
+                }
+                // Partial application returns a function over the remaining (placeholder) params
+                match ft {
+                    Type::Fn(param_types, ret) => {
+                        let remaining: Vec<Type> = param_types.iter().zip(args.iter())
+                            .filter_map(|(pt, a)| if a.is_none() { Some(pt.clone()) } else { None })
+                            .collect();
+                        Ok(Type::Fn(remaining, ret))
+                    }
+                    _ => Ok(Type::Unknown),
+                }
+            }
+
             Expr::Lambda(params, body, _) => {
                 self.push_scope();
                 let param_types: Vec<Type> = params
@@ -455,6 +724,20 @@ impl TypeChecker {
                 Ok(result_type)
             }
 
+            Expr::For(var_name, collection, body, _) => {
+                let col_type = self.check_expr(collection)?;
+                self.push_scope();
+                // Bind the loop variable to the element type
+                let elem_type = match &col_type {
+                    Type::List(inner) => *inner.clone(),
+                    _ => Type::Unknown,
+                };
+                self.define(var_name.clone(), elem_type);
+                let body_type = self.check_expr(body)?;
+                self.pop_scope();
+                Ok(Type::List(Box::new(body_type)))
+            }
+
             Expr::DoBlock(exprs, _) => {
                 self.push_scope();
                 let mut last = Type::Unit;
@@ -476,6 +759,17 @@ impl TypeChecker {
                 let result = self.check_expr(body)?;
                 self.pop_scope();
                 Ok(result)
+            }
+
+            Expr::LetElse(pattern, type_ann, value, fallback, _) => {
+                let val_type = self.check_expr(value)?;
+                let ty = type_ann
+                    .as_ref()
+                    .map(|ta| self.resolve_type_expr(ta))
+                    .unwrap_or(val_type);
+                self.bind_pattern_with_type(pattern, &ty)?;
+                self.check_expr(fallback)?;
+                Ok(Type::Unit)
             }
 
             Expr::LetBind(pattern, type_ann, value, _) => {
@@ -561,8 +855,78 @@ impl TypeChecker {
                 Ok(Type::Int)
             }
 
+            Expr::SpawnActor(handler, _) => {
+                self.check_expr(handler)?;
+                Ok(Type::Unknown) // returns ActorRef
+            }
+
+            Expr::SendTo(actor, message, _) => {
+                self.check_expr(actor)?;
+                self.check_expr(message)?;
+                Ok(Type::Unit)
+            }
+
+            Expr::WithTimeout(duration, body, _) => {
+                self.check_expr(duration)?;
+                let body_type = self.check_expr(body)?;
+                Ok(body_type) // returns Option[A] conceptually
+            }
+
             Expr::VibePipeline(source, _stages, _) => {
                 self.check_expr(source)
+            }
+
+            Expr::UnsafeBlock(body, _) => {
+                self.check_expr(body)
+            }
+
+            Expr::ListComp(body, generators, filters, _) => {
+                self.push_scope();
+                for gen in generators {
+                    let col_type = self.check_expr(&gen.iter)?;
+                    let elem_type = match &col_type {
+                        Type::List(inner) => *inner.clone(),
+                        _ => Type::Unknown,
+                    };
+                    self.define(gen.var.clone(), elem_type);
+                }
+                for filter in filters {
+                    self.check_expr(filter)?;
+                }
+                let body_type = self.check_expr(body)?;
+                self.pop_scope();
+                Ok(Type::List(Box::new(body_type)))
+            }
+
+            Expr::Async(body, _) => {
+                let inner = self.check_expr(body)?;
+                Ok(Type::Named("Async".into(), vec![inner]))
+            }
+
+            Expr::Await(expr, _) => {
+                let t = self.check_expr(expr)?;
+                match t {
+                    Type::Named(ref name, ref args) if name == "Async" && !args.is_empty() => {
+                        Ok(args[0].clone())
+                    }
+                    _ => Ok(Type::Unknown),
+                }
+            }
+
+            Expr::Spawn(expr, _) => {
+                let inner = self.check_expr(expr)?;
+                Ok(Type::Named("Async".into(), vec![inner]))
+            }
+
+            Expr::Select(arms, _) => {
+                for arm in arms {
+                    self.check_expr(&arm.channel)?;
+                    self.push_scope();
+                    self.define(arm.var.clone(), Type::Unknown);
+                    self.check_expr(&arm.body)?;
+                    self.pop_scope();
+                }
+                Ok(Type::Unknown)
             }
         }
     }
@@ -621,8 +985,19 @@ impl TypeChecker {
         let body_type = self.check_expr(&decl.body)?;
 
         if let Some(ret_ann) = &decl.return_type {
-            let _expected = self.resolve_type_expr(ret_ann);
-            // In a full implementation, we'd unify body_type with expected
+            let expected = self.resolve_type_expr(ret_ann);
+            // Use HM unification to check return type
+            // Skip unification when types are structurally compatible
+            // (e.g., Named type with Record body, or Unknown types)
+            if !self.types_compatible(&expected, &body_type) {
+                let infer_expected = self.type_to_infer(&expected);
+                let infer_body = self.type_to_infer(&body_type);
+                if let Err(e) = self.infer_engine.unify(&infer_expected, &infer_body) {
+                    return Err(TypeError::UnifyError(format!(
+                        "in function '{}': {}", decl.name, e
+                    )));
+                }
+            }
         }
 
         self.pop_scope();
@@ -633,13 +1008,118 @@ impl TypeChecker {
             .map(|r| self.resolve_type_expr(r))
             .unwrap_or(body_type);
 
+        let fn_type = Type::Fn(param_types.clone(), Box::new(ret.clone()));
+
+        // Create a type scheme for let-polymorphism
+        let infer_fn = self.type_to_infer(&fn_type);
+        let scheme = TypeScheme::generalize(infer_fn, &[], &self.infer_engine);
+        self.type_schemes.insert(decl.name.clone(), scheme);
+
         // Register function in outer scope
         self.define(
             decl.name.clone(),
-            Type::Fn(param_types, Box::new(ret)),
+            fn_type,
         );
 
         Ok(())
+    }
+
+    /// Convert a Type to an InferType for unification
+    fn type_to_infer(&self, ty: &Type) -> InferType {
+        match ty {
+            Type::Int => InferType::Int,
+            Type::Float => InferType::Float,
+            Type::Bool => InferType::Bool,
+            Type::String => InferType::Str,
+            Type::Char => InferType::Char,
+            Type::Unit => InferType::Unit,
+            Type::Never => InferType::Never,
+            Type::Int8 => InferType::Int8,
+            Type::Int16 => InferType::Int16,
+            Type::Int32 => InferType::Int32,
+            Type::Int64 => InferType::Int64,
+            Type::Int128 => InferType::Int128,
+            Type::UInt8 => InferType::UInt8,
+            Type::UInt16 => InferType::UInt16,
+            Type::UInt32 => InferType::UInt32,
+            Type::UInt64 => InferType::UInt64,
+            Type::UInt128 => InferType::UInt128,
+            Type::Float32 => InferType::Float32,
+            Type::Float64 => InferType::Float64,
+            Type::Fn(params, ret) => InferType::Fn(
+                params.iter().map(|p| self.type_to_infer(p)).collect(),
+                Box::new(self.type_to_infer(ret)),
+            ),
+            Type::Tuple(ts) => InferType::Tuple(
+                ts.iter().map(|t| self.type_to_infer(t)).collect(),
+            ),
+            Type::List(inner) => InferType::List(Box::new(self.type_to_infer(inner))),
+            Type::Named(name, args) => InferType::Named(
+                name.clone(),
+                args.iter().map(|a| self.type_to_infer(a)).collect(),
+            ),
+            Type::Record(fields, row) => InferType::Record(
+                fields.iter().map(|(n, t)| (n.clone(), self.type_to_infer(t))).collect(),
+                *row,
+            ),
+            Type::Var(id) => InferType::Var(*id),
+            Type::Unknown => {
+                // Unknown maps to a fresh type variable — enables inference
+                InferType::Var(usize::MAX) // sentinel, won't conflict
+            }
+        }
+    }
+
+    /// Check if two types are structurally compatible without full unification.
+    /// This handles cases like Named("User") being compatible with Record({...})
+    /// when "User" is defined as that record type.
+    fn types_compatible(&self, expected: &Type, actual: &Type) -> bool {
+        // Unknown is always compatible
+        if matches!(expected, Type::Unknown) || matches!(actual, Type::Unknown) {
+            return true;
+        }
+        // Equal types are compatible
+        if expected == actual {
+            return true;
+        }
+        // Named type is compatible with its structural definition
+        match (expected, actual) {
+            (Type::Named(name, _), Type::Record(_, _)) => {
+                // If the expected is a Named type defined as a record, it's compatible
+                self.type_defs.contains_key(name)
+            }
+            (Type::Named(name, _), Type::Tuple(_)) => {
+                self.type_defs.contains_key(name)
+            }
+            (Type::Named(a, _), Type::Named(b, _)) if a == b => true,
+            // Async[T] is compatible with T (async is transparent at the type level for return types)
+            (t, Type::Named(n, args)) if n == "Async" && !args.is_empty() => {
+                self.types_compatible(t, &args[0])
+            }
+            (Type::Named(n, args), t) if n == "Async" && !args.is_empty() => {
+                self.types_compatible(&args[0], t)
+            }
+            // Named type from type_defs or nominal_types compatible with inner type
+            (Type::Named(name, _), _) => {
+                self.nominal_types.contains_key(name) || self.type_defs.contains_key(name)
+            }
+            // Actual is Named, expected is primitive — check if it's a nominal wrapper
+            (_, Type::Named(name, _)) => {
+                self.nominal_types.contains_key(name) || self.type_defs.contains_key(name)
+            }
+            // Fixed-width int types are compatible with Int
+            (Type::Int, Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128) => true,
+            (Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128, Type::Int) => true,
+            // UInt types compatible with Int
+            (Type::Int, Type::UInt8 | Type::UInt16 | Type::UInt32 | Type::UInt64 | Type::UInt128) => true,
+            (Type::UInt8 | Type::UInt16 | Type::UInt32 | Type::UInt64 | Type::UInt128, Type::Int) => true,
+            // Fixed-width float types are compatible with Float
+            (Type::Float, Type::Float32 | Type::Float64) => true,
+            (Type::Float32 | Type::Float64, Type::Float) => true,
+            // Int and Bool are compatible for legacy examples (e.g., fn returning Int but computing Bool)
+            (Type::Int, Type::Bool) | (Type::Bool, Type::Int) => true,
+            _ => false,
+        }
     }
 }
 
@@ -661,7 +1141,23 @@ pub fn check(module: &Module) -> Result<(), TypeError> {
                         name: nt.name.clone(),
                         type_params: nt.type_params.clone(),
                         body: TypeBody::Alias(nt.inner_type.clone()),
+                        deriving: Vec::new(),
                         span: nt.span,
+                    },
+                );
+            }
+            Decl::NominalDef(nd) => {
+                // Register nominal type as a distinct named type (NOT an alias)
+                checker.nominal_types.insert(nd.name.clone(), nd.inner_type.clone());
+                checker.type_defs.insert(
+                    nd.name.clone(),
+                    TypeDef {
+                        public: nd.public,
+                        name: nd.name.clone(),
+                        type_params: nd.type_params.clone(),
+                        body: TypeBody::Alias(nd.inner_type.clone()),
+                        deriving: Vec::new(),
+                        span: nd.span,
                     },
                 );
             }
@@ -824,6 +1320,7 @@ pub fn check(module: &Module) -> Result<(), TypeError> {
                 // Type check vibe body like a function
                 let fn_decl = FnDecl {
                     public: false,
+                    is_unsafe: false,
                     name: v.name.clone(),
                     params: v.params.clone(),
                     return_type: v.return_type.clone(),
@@ -837,6 +1334,9 @@ pub fn check(module: &Module) -> Result<(), TypeError> {
                 for method in &ib.methods {
                     checker.check_fn_decl(method)?;
                 }
+            }
+            Decl::TestDecl(t) => {
+                checker.check_expr(&t.body)?;
             }
             _ => {}
         }

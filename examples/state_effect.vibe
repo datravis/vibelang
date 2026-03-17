@@ -1,0 +1,13 @@
+-- State effect: get() and put() for stateful computation
+fn counter() -> Int = do
+    let current = get()
+    put(current + 1)
+    current + 1
+
+fn main() -> Unit = do
+    let result = handle counter()
+        with State {
+            get() -> resume(0)
+            put(s) -> resume(())
+        }
+    print(result)

@@ -1,0 +1,8 @@
+-- Effect polymorphism: functions polymorphic over effects
+fn apply[A](f: fn(A) -> A, x: A) -> A = f(x)
+
+fn double(n: Int) -> Int = n * 2
+
+fn main() -> Unit = do
+    let result = apply(double, 21)
+    print(result)

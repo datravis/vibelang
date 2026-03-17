@@ -1,0 +1,41 @@
+-- Math functions: sqrt, pow, sin, cos, tan, log, floor, ceil, round, clamp
+-- Math constants: pi, e, tau
+
+fn main() -> Unit = do
+    let x = sqrt(16.0)
+    print(x)
+
+    let y = pow(2.0, 10.0)
+    print(y)
+
+    let s = sin(0.0)
+    print(s)
+
+    let c = cos(0.0)
+    print(c)
+
+    let logged = log(1.0)
+    print(logged)
+
+    let l2 = log2(8.0)
+    print(l2)
+
+    let l10 = log10(1000.0)
+    print(l10)
+
+    let f = floor(3.7)
+    print(f)
+
+    let c2 = ceil(3.2)
+    print(c2)
+
+    let r = round(3.5)
+    print(r)
+
+    let clamped = clamp(15, 0, 10)
+    print(clamped)
+
+    let t = tan(0.0)
+    print(t)
+
+    print("done")

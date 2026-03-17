@@ -1,0 +1,11 @@
+-- Fail effect: raise() for error handling
+fn safe_divide(a: Int, b: Int) -> Int = do
+    if b == 0 then raise("division by zero")
+    else a / b
+
+fn main() -> Unit = do
+    let result = handle safe_divide(10, 2)
+        with Fail {
+            raise(err) -> 0
+        }
+    print(result)

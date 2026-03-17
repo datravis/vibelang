@@ -1,0 +1,11 @@
+-- Test prelude functions: identity, assert, range, etc.
+fn main() -> Unit = do
+    let x = identity(42)
+    print(x)
+    assert(x == 42, "identity should return its argument")
+    let nums = range(1, 5)
+    print(nums)
+    let m = max(10, 20)
+    print(m)
+    let a = abs(0 - 5)
+    print(a)

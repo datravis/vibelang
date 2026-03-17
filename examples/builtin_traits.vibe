@@ -1,0 +1,26 @@
+--- Built-in traits example
+--- Demonstrates Eq, Ord, Show, Hash, Default traits
+
+module builtin_traits
+
+--- Define a simple type
+type Color = | Red | Green | Blue
+
+--- Implement Show for Color
+impl Show for Color {
+    fn to_string(c: Color) -> String = match c
+        | Red -> "Red"
+        | Green -> "Green"
+        | Blue -> "Blue"
+}
+
+--- Implement Eq for Color using string comparison
+impl Eq for Color {
+    fn eq(a: Color, b: Color) -> Bool = show(a) == show(b)
+}
+
+fn main() -> Unit with IO = do
+    let c1 = Red
+    let c2 = Blue
+    print(to_string(c1))
+    print(to_string(c2))

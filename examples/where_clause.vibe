@@ -1,0 +1,14 @@
+-- Where clauses on functions
+fn sum_of_squares(a: Int, b: Int) -> Int =
+    a_sq + b_sq
+    where a_sq = a * a, b_sq = b * b
+
+fn circle_area(r: Float) -> Float =
+    pi * r * r
+    where pi = 3.14159
+
+fn main() -> Unit = do
+    let s = sum_of_squares(3, 4)
+    let area = circle_area(5.0)
+    print(s)
+    print(area)

@@ -106,3 +106,61 @@ fn lex_identifiers_vs_type_idents() {
         ]
     );
 }
+
+#[test]
+fn lex_hex_literals() {
+    let k = kinds("0xFF 0x1A 0xDEAD");
+    assert_eq!(
+        k,
+        vec![
+            TokenKind::IntLit(0xFF),
+            TokenKind::IntLit(0x1A),
+            TokenKind::IntLit(0xDEAD),
+        ]
+    );
+}
+
+#[test]
+fn lex_binary_literals() {
+    let k = kinds("0b1010 0b11110000 0b0");
+    assert_eq!(
+        k,
+        vec![
+            TokenKind::IntLit(0b1010),
+            TokenKind::IntLit(0b11110000),
+            TokenKind::IntLit(0b0),
+        ]
+    );
+}
+
+#[test]
+fn lex_octal_literals() {
+    let k = kinds("0o77 0o755 0o0");
+    assert_eq!(
+        k,
+        vec![
+            TokenKind::IntLit(0o77),
+            TokenKind::IntLit(0o755),
+            TokenKind::IntLit(0o0),
+        ]
+    );
+}
+
+#[test]
+fn lex_underscored_numbers() {
+    let k = kinds("1_000_000 0xFF_FF 0b1111_0000");
+    assert_eq!(
+        k,
+        vec![
+            TokenKind::IntLit(1_000_000),
+            TokenKind::IntLit(0xFFFF),
+            TokenKind::IntLit(0b11110000),
+        ]
+    );
+}
+
+#[test]
+fn lex_nominal_keyword() {
+    let k = kinds("nominal type");
+    assert_eq!(k, vec![TokenKind::Nominal, TokenKind::Type]);
+}

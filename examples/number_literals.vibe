@@ -1,0 +1,25 @@
+--- Hex, binary, and octal integer literals example
+
+module number_literals
+
+fn main() -> Unit with IO = do
+    --- Hexadecimal
+    let hex_val = 0xFF
+    print(show(hex_val))
+
+    --- Binary
+    let bin_val = 0b1010
+    print(show(bin_val))
+
+    --- Octal
+    let oct_val = 0o77
+    print(show(oct_val))
+
+    --- With underscores for readability
+    let big_hex = 0xFF_FF
+    let big_bin = 0b1111_0000
+    let big_dec = 1_000_000
+
+    print(show(big_hex))
+    print(show(big_bin))
+    print(show(big_dec))

@@ -190,6 +190,21 @@ impl EscapeAnalyzer {
                 }
             }
 
+            Expr::PartialApp(func, args, _) => {
+                self.analyze_expr(func, false);
+                for expr in args.iter().flatten() {
+                    self.analyze_expr(expr, false);
+                }
+            }
+
+            Expr::For(var_name, collection, body, _) => {
+                self.analyze_expr(collection, false);
+                self.scope_depth += 1;
+                self.define(var_name);
+                self.analyze_expr(body, is_tail);
+                self.scope_depth -= 1;
+            }
+
             Expr::Lambda(params, body, _) => {
                 // Variables captured by lambdas escape the function
                 self.scope_depth += 1;
@@ -250,6 +265,12 @@ impl EscapeAnalyzer {
                 self.bind_pattern(pattern);
             }
 
+            Expr::LetElse(pattern, _, value, fallback, _) => {
+                self.analyze_expr(value, false);
+                self.bind_pattern(pattern);
+                self.analyze_expr(fallback, false);
+            }
+
             Expr::Handle(expr, handlers, _) => {
                 self.analyze_expr(expr, is_tail);
                 for handler in handlers {
@@ -289,11 +310,12 @@ impl EscapeAnalyzer {
                 self.analyze_expr(func, false);
             }
 
-            Expr::ChanCreate(cap, _) => {
+            Expr::ChanCreate(cap, _) | Expr::SpawnActor(cap, _)
+            | Expr::UnsafeBlock(cap, _) => {
                 self.analyze_expr(cap, false);
             }
 
-            Expr::ChanSend(ch, val, _) => {
+            Expr::ChanSend(ch, val, _) | Expr::SendTo(ch, val, _) | Expr::WithTimeout(ch, val, _) => {
                 self.analyze_expr(ch, false);
                 self.analyze_expr(val, false);
             }
@@ -321,11 +343,21 @@ impl EscapeAnalyzer {
                         crate::ast::PipelineStage::Any(f) |
                         crate::ast::PipelineStage::All(f) |
                         crate::ast::PipelineStage::Reduce(f) |
-                        crate::ast::PipelineStage::Inspect(f) => {
+                        crate::ast::PipelineStage::Inspect(f) |
+                        crate::ast::PipelineStage::DistinctBy(f) |
+                        crate::ast::PipelineStage::Zip(f) |
+                        crate::ast::PipelineStage::MinBy(f) |
+                        crate::ast::PipelineStage::MaxBy(f) |
+                        crate::ast::PipelineStage::CollectMap(f) |
+                        crate::ast::PipelineStage::Merge(f) |
+                        crate::ast::PipelineStage::Broadcast(f) => {
                             self.analyze_expr(f, false);
                         }
                         crate::ast::PipelineStage::Fold(init, f) |
-                        crate::ast::PipelineStage::Scan(init, f) => {
+                        crate::ast::PipelineStage::Scan(init, f) |
+                        crate::ast::PipelineStage::Window(init, f) |
+                        crate::ast::PipelineStage::Batch(init, f) |
+                        crate::ast::PipelineStage::Parallel(init, f) => {
                             self.analyze_expr(init, false);
                             self.analyze_expr(f, false);
                         }
@@ -333,8 +365,28 @@ impl EscapeAnalyzer {
                         crate::ast::PipelineStage::Count |
                         crate::ast::PipelineStage::First |
                         crate::ast::PipelineStage::Last |
-                        crate::ast::PipelineStage::Distinct => {}
+                        crate::ast::PipelineStage::Distinct |
+                        crate::ast::PipelineStage::CollectVec |
+                        crate::ast::PipelineStage::Sequential => {}
                     }
+                }
+            }
+            Expr::ListComp(body, generators, filters, _) => {
+                for gen in generators {
+                    self.analyze_expr(&gen.iter, false);
+                }
+                for filter in filters {
+                    self.analyze_expr(filter, false);
+                }
+                self.analyze_expr(body, false);
+            }
+            Expr::Async(body, _) | Expr::Await(body, _) | Expr::Spawn(body, _) => {
+                self.analyze_expr(body, false);
+            }
+            Expr::Select(arms, _) => {
+                for arm in arms {
+                    self.analyze_expr(&arm.channel, false);
+                    self.analyze_expr(&arm.body, false);
                 }
             }
         }

@@ -1,0 +1,10 @@
+-- Unsafe blocks: opt out of safety checks for low-level operations
+
+unsafe fn fast_add(a: Int, b: Int) -> Int = a + b
+
+fn main() -> Unit = do
+    let result = unsafe {
+        fast_add(40, 2)
+    }
+    print(result)
+    print("done")
