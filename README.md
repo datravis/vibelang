@@ -1,4 +1,5 @@
 # VibeLang
+<!-- connectivity test: 2026-03-19 -->
 
 A purely functional, natively compiled programming language with memory safety guarantees.
 
